@@ -1060,7 +1060,7 @@ class TripletexService:
                     emp = employments[0]
                     details = self.client.list(
                         "/employee/employment/details",
-                        fields="id",
+                        fields="id,employmentForm,employmentType,remunerationType,workingHoursScheme,percentageOfFullTimeEquivalent,occupationCode(id,code)",
                         params={"employmentId": emp["id"], "count": 1},
                     )
                     form_update: dict[str, Any] = {}
@@ -1069,14 +1069,9 @@ class TripletexService:
                         if form_lower in ("permanent", "fast"):
                             form_update["employmentForm"] = "PERMANENT"
                             form_update["employmentType"] = "ORDINARY"
-                            form_update["remunerationType"] = "MONTHLY_WAGE"
-                            form_update["workingHoursScheme"] = "NOT_SHIFT"
                         elif form_lower in ("temporary", "midlertidig"):
                             form_update["employmentForm"] = "TEMPORARY"
                             form_update["employmentType"] = "ORDINARY"
-                    # Set remuneration type based on salary type
-                    if hourly:
-                        form_update["remunerationType"] = "HOURLY_WAGE"
                     # Set percentage of full-time equivalent
                     if pct is not None:
                         form_update["percentageOfFullTimeEquivalent"] = float(pct)
@@ -1099,9 +1094,24 @@ class TripletexService:
                         except Exception as e:
                             LOGGER.warning("Could not look up STYRK code %s: %s", styrk_str, e)
                     if form_update and details:
-                        self.client.update("/employee/employment/details", details[0]["id"], form_update)
-                        LOGGER.info("Updated employment details for employee %s: %s",
-                                    employee["id"], list(form_update.keys()))
+                        detail_id = details[0]["id"]
+                        # First update: form, type, percentage, STYRK (without remunerationType)
+                        try:
+                            self.client.update("/employee/employment/details", detail_id, form_update)
+                            LOGGER.info("Updated employment details for employee %s: %s",
+                                        employee["id"], list(form_update.keys()))
+                        except TripletexAPIError as e:
+                            LOGGER.warning("Could not update employment form: %s", e)
+                        # Second update: remunerationType separately (sometimes fails with type error)
+                        rem_type = "HOURLY_WAGE" if hourly else "MONTHLY_WAGE" if employment_form else None
+                        if rem_type:
+                            try:
+                                self.client.update("/employee/employment/details", detail_id, {
+                                    "remunerationType": rem_type,
+                                })
+                                LOGGER.info("Set remunerationType=%s for employee %s", rem_type, employee["id"])
+                            except Exception as e2:
+                                LOGGER.warning("Could not set remunerationType: %s (non-critical)", e2)
             except Exception as e:
                 LOGGER.warning("Could not update employment details: %s", e)
 
@@ -1605,9 +1615,16 @@ class TripletexService:
                         "libro mayor", "hovedbok", "ledger", "hauptbuch", "grand livre")
         expense_kw = ("gastos", "expense", "utgift", "kostnad", "Aufwand", "charge",
                        "despesa", "cuentas de gastos", "expense account")
+        multi_kw = ("cada una", "each of", "for each", "for every", "hver av",
+                     "for kvar", "fur jede", "pour chaque", "para cada",
+                     "tre ", "three", "drei", "trois", "tres ")
         has_analysis = _contains_any_ascii(prompt, analysis_kw)
         has_expense = _contains_any_ascii(prompt, expense_kw)
         has_project = _contains_any_ascii(prompt, ("proyecto", "project", "prosjekt", "Projekt", "projet"))
+        has_multi = _contains_any_ascii(prompt, multi_kw)
+        # If prompt clearly asks to analyze + create multiple projects, ignore LLM-provided name
+        if has_analysis and has_expense and has_project and has_multi:
+            return True
         no_name = not (task.attributes.get("name") or task.target_name)
         return has_analysis and has_expense and has_project and no_name
 
@@ -3001,8 +3018,11 @@ class TripletexService:
             self._correct_prepaid_expense_in_postings(postings, task.raw_prompt or "")
 
         # Strip internal metadata fields before sending to API
-        for p in postings:
-            p.pop("_account_number", None)
+        def _strip_internal(posting_list: list[dict[str, Any]]) -> None:
+            for p in posting_list:
+                p.pop("_account_number", None)
+
+        _strip_internal(postings)
 
         if is_year_end and len(postings) > 2:
             # Create separate vouchers for each debit/credit pair
@@ -3019,6 +3039,7 @@ class TripletexService:
                     }
                     if voucher_type:
                         pair_payload["voucherType"] = {"id": voucher_type["id"]}
+                    _strip_internal(pair)
                     self.client.create("/ledger/voucher", pair_payload)
                     LOGGER.info("Created separate year-end voucher: %s", pair_desc)
         else:
@@ -3029,6 +3050,7 @@ class TripletexService:
             }
             if voucher_type:
                 payload["voucherType"] = {"id": voucher_type["id"]}
+            _strip_internal(postings)
             self.client.create("/ledger/voucher", payload)
 
         # Monthly/year-end closing: ensure salary provision if requested

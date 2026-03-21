@@ -1094,8 +1094,11 @@ class TestEmployeeFieldCompleteness(unittest.TestCase):
                         "Employment details should be updated for permanent form")
         payload = detail_updates[0][2]
         self.assertEqual(payload.get("employmentForm"), "PERMANENT")
-        self.assertEqual(payload.get("remunerationType"), "MONTHLY_WAGE")
-        self.assertEqual(payload.get("workingHoursScheme"), "NOT_SHIFT")
+        # remunerationType is now sent in a separate update to avoid type errors
+        all_payloads = [p for _, _, p in detail_updates]
+        rem_types = [p.get("remunerationType") for p in all_payloads if p.get("remunerationType")]
+        self.assertTrue(len(rem_types) >= 1, "remunerationType should be set in a separate update")
+        self.assertEqual(rem_types[0], "MONTHLY_WAGE")
 
 
 # ===========================================================================
