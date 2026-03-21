@@ -3182,7 +3182,11 @@ class TripletexService:
             except (TypeError, ValueError):
                 continue
 
-            if debit_account != 2710 or credit_account != 1920 or vat_amount <= 0:
+            if debit_account != 2710 or vat_amount <= 0:
+                continue
+            # For correction tasks, the credit account for missing VAT should
+            # be the original counter (usually 1920 bank, not 2400 payable)
+            if credit_account not in (1920, 2400):
                 continue
 
             description_normalized = _normalize_ascii(posting.get("description") or "")
@@ -3198,6 +3202,10 @@ class TripletexService:
                 net_amount=net_amount,
                 voucher_date=voucher_date,
             )
+            # Default to 1920 (bank) if ledger lookup fails — most common
+            # counter account on fresh competition accounts
+            if not inferred_counter and credit_account != 1920:
+                inferred_counter = 1920
             if inferred_counter and inferred_counter != credit_account:
                 posting["creditAccount"] = inferred_counter
                 LOGGER.info(
@@ -3527,6 +3535,13 @@ class TripletexService:
             )
             return
 
+        # Detect correction tasks: create separate vouchers per correction
+        is_correction = _contains_any_ascii(
+            task.raw_prompt,
+            ("korriger", "correction", "feil i hovedbok", "correccion",
+             "korrektur", "rettelse", "feilene", "corriger", "correcao"),
+        )
+
         # Detect year-end closing: create separate vouchers for each posting pair
         is_year_end = _contains_any_ascii(
             task.raw_prompt,
@@ -3552,7 +3567,7 @@ class TripletexService:
 
         _strip_internal(postings)
 
-        if is_year_end and len(postings) > 2:
+        if (is_year_end or is_correction) and len(postings) > 2:
             # Create separate vouchers for each debit/credit pair
             for i in range(0, len(postings), 2):
                 pair = postings[i:i+2]
@@ -3569,7 +3584,7 @@ class TripletexService:
                         pair_payload["voucherType"] = {"id": voucher_type["id"]}
                     _strip_internal(pair)
                     self.client.create("/ledger/voucher", pair_payload)
-                    LOGGER.info("Created separate year-end voucher: %s", pair_desc)
+                    LOGGER.info("Created separate correction voucher: %s", pair_desc)
         else:
             payload: dict[str, Any] = {
                 "date": voucher_date.isoformat(),
