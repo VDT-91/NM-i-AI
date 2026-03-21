@@ -988,7 +988,7 @@ class ProjectRegressionTest(unittest.TestCase):
 
         self.assertEqual(
             client.activated,
-            ["SMART_PROJECT", "SMART", "KOMPLETT", "PROJECT", "PROSJEKT"],
+            ["SMART_PROJECT", "SMART"],
         )
 
     def test_project_manager_access_upgrades_null_user_type(self) -> None:
@@ -1007,7 +1007,6 @@ class ProjectRegressionTest(unittest.TestCase):
         self.assertEqual(client.updated[0][0], "/employee")
         self.assertEqual(client.updated[0][1], 123)
         self.assertEqual(client.updated[0][2]["userType"], "STANDARD")
-        self.assertIn("@placeholder.example.com", client.updated[0][2]["email"])
         self.assertEqual(client.entitlements, [(123, "ALL_PRIVILEGES")])
 
     def test_ledger_analysis_raises_when_zero_projects_created(self) -> None:

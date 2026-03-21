@@ -1504,9 +1504,12 @@ class TripletexService:
         return None
 
     def _activate_project_module(self) -> None:
-        """Activate the module required for project creation, trying multiple options."""
+        """Activate the module required for project creation.
+        Only SMART_PROJECT + SMART are used -- KOMPLETT/PROJECT/PROSJEKT
+        can invalidate session or break permissions.
+        """
         activated_any = False
-        for mod in ("SMART_PROJECT", "SMART", "KOMPLETT", "PROJECT", "PROSJEKT"):
+        for mod in ("SMART_PROJECT", "SMART"):
             try:
                 self.client.activate_sales_module(mod)
                 LOGGER.info("Activated %s module for project creation", mod)
@@ -8344,30 +8347,21 @@ class TripletexService:
         try:
             current_type = employee.get("userType")
             if not current_type or current_type == "NO_ACCESS":
-                update_payload: dict[str, Any] = {"userType": "STANDARD"}
-                # STANDARD userType requires an email address
-                if not employee.get("email"):
-                    first = _normalize_ascii(employee.get("firstName", "pm")).replace(" ", "") or "pm"
-                    last = _normalize_ascii(employee.get("lastName", "user")).replace(" ", "") or "user"
-                    import time as _time
-                    update_payload["email"] = f"{first}.{last}.{int(_time.time()) % 100000}@placeholder.example.com"
+                # Try upgrading userType without changing email first
                 try:
-                    self.client.update("/employee", employee["id"], update_payload)
+                    self.client.update("/employee", employee["id"], {"userType": "STANDARD"})
                     employee["userType"] = "STANDARD"
-                    if update_payload.get("email"):
-                        employee["email"] = update_payload["email"]
                 except TripletexAPIError as ue:
-                    if ue.status_code == 422:
-                        # Email might already be taken  -- try with unique suffix
-                        LOGGER.warning("PM userType upgrade failed (%s), retrying with unique email", ue)
+                    if ue.status_code == 422 and "email" not in str(ue).lower():
+                        # STANDARD requires email -- add one
                         first = _normalize_ascii(employee.get("firstName", "pm")).replace(" ", "") or "pm"
                         last = _normalize_ascii(employee.get("lastName", "user")).replace(" ", "") or "user"
                         import time as _time
-                        update_payload["email"] = f"{first}.{last}.pm.{int(_time.time()) % 100000}@placeholder.example.com"
-                        self.client.update("/employee", employee["id"], update_payload)
+                        email = f"{first}.{last}.{int(_time.time()) % 100000}@placeholder.example.com"
+                        self.client.update("/employee", employee["id"], {"userType": "STANDARD", "email": email})
                         employee["userType"] = "STANDARD"
-                        employee["email"] = update_payload["email"]
-                    else:
+                        employee["email"] = email
+                    elif ue.status_code != 422:
                         raise
             self.client.grant_entitlements(employee["id"], "ALL_PRIVILEGES")
             self._cache_set(cache_key, True)
