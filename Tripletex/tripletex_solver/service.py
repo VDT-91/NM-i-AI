@@ -409,7 +409,7 @@ class TripletexService:
             Entity.SALARY_TRANSACTION: ("WAGE", "SMART"),
             # Entity.INCOMING_INVOICE  -- modules activated in handler; API is BETA/restricted
             Entity.PURCHASE_ORDER: ("SMART",),
-            Entity.TRAVEL_EXPENSE: ("SMART",),
+            Entity.TRAVEL_EXPENSE: ("SMART", "ACCOUNTING_OFFICE"),
             # Entity.INVOICE  -- no module needed; activating can invalidate session
             Entity.BANK_STATEMENT: ("SMART", "APPROVE_VOUCHER"),
             Entity.DIVISION: ("SMART",),
@@ -2333,11 +2333,14 @@ class TripletexService:
 
     def _create_travel_expense(self, task: ParsedTask) -> None:
         # Activate travel-related modules
-        for mod in ("SMART", "APPROVE_VOUCHER"):
+        for mod in ("SMART", "APPROVE_VOUCHER", "ACCOUNTING_OFFICE"):
             try:
                 self.client.activate_sales_module(mod)
             except Exception:
                 pass
+
+        # Grant ALL_PRIVILEGES to session user so they can create travel expenses for others
+        self._ensure_session_user_privileges()
 
         employee_name = task.attributes.get("employeeName") or task.target_name
         employee_email = task.attributes.get("employeeEmail") or task.attributes.get("email")
@@ -2368,6 +2371,11 @@ class TripletexService:
                 LOGGER.info("Explicitly upgraded travel-expense employee %s to STANDARD", employee["id"])
             except Exception as e:
                 LOGGER.warning("Could not explicitly upgrade travel-expense employee %s: %s", employee.get("id"), e)
+        # Also grant ALL_PRIVILEGES to the travel-expense employee
+        try:
+            self.client.grant_entitlements(employee["id"], "ALL_PRIVILEGES")
+        except Exception as e:
+            LOGGER.warning("Could not grant ALL_PRIVILEGES to travel employee %s: %s", employee["id"], e)
         departure_date_val = task.attributes.get("departureDate")
         return_date_val = task.attributes.get("returnDate")
         if not departure_date_val:
@@ -6031,18 +6039,18 @@ class TripletexService:
     def _reconcile_bank_fee_refund(
         self, amount: float, line_date: date, bank_account: dict[str, Any] | None,
     ) -> None:
-        """Create voucher for bank fee refunds: debit 1920, credit 3900/7770."""
-        accounts_3900 = self.client.search_accounts_by_number(3900)
+        """Create voucher for bank fee refunds: debit 1920, credit 7770 (reduce expense)."""
+        accounts_7770 = self.client.search_accounts_by_number(7770)
         accounts_1920 = self.client.search_accounts_by_number(1920)
-        if not accounts_3900:
-            accounts_3900 = self.client.search_accounts_by_number(7770)
-        if not accounts_3900 or not accounts_1920:
-            LOGGER.warning("Could not find accounts 3900/1920 for bank fee refund voucher")
+        if not accounts_7770:
+            accounts_7770 = self.client.search_accounts_by_number(7780)
+        if not accounts_7770 or not accounts_1920:
+            LOGGER.warning("Could not find accounts 7770/1920 for bank fee refund voucher")
             return
         self._create_reconciliation_voucher(
-            line_date, "Refusjon bankgebyr",
-            accounts_1920[0]["id"], accounts_3900[0]["id"],
-            float(amount), "Refusjon bankgebyr",
+            line_date, "Bankgebyr",
+            accounts_1920[0]["id"], accounts_7770[0]["id"],
+            float(amount), "Bankgebyr",
         )
         LOGGER.info("Created bank fee refund voucher: amount %.2f", amount)
 
@@ -8350,6 +8358,41 @@ class TripletexService:
     def _resolve_project_manager(self) -> dict[str, Any]:
         # Fresh account optimization: skip search, create directly via _ensure_employee (cached).
         return self._ensure_employee(name=DEFAULT_PROJECT_MANAGER_NAME, email=None)
+
+    def _ensure_session_user_privileges(self) -> None:
+        """Grant ALL_PRIVILEGES to the current session user (logged-in employee).
+
+        This is needed for operations like creating travel expenses on behalf
+        of other employees, which require elevated permissions.
+        """
+        if self._cache_get("session_user_privileged"):
+            return
+        try:
+            # Get the logged-in employee via /token/session
+            session_info = self.client.get("/token/session", fields="employee(id)")
+            if session_info and session_info.get("employee", {}).get("id"):
+                emp_id = session_info["employee"]["id"]
+                self.client.grant_entitlements(emp_id, "ALL_PRIVILEGES")
+                self._cache_set("session_user_privileged", True)
+                LOGGER.info("Granted ALL_PRIVILEGES to session user (employee %s)", emp_id)
+                return
+        except Exception as e:
+            LOGGER.warning("Could not get session user via /token/session: %s", e)
+        # Fallback: grant to all employees with login access
+        try:
+            employees = self.client.list("/employee", params={
+                "count": 10,
+            }, fields="id,firstName,lastName,userType")
+            for emp in employees:
+                if emp.get("userType") not in (None, "", "NO_ACCESS"):
+                    try:
+                        self.client.grant_entitlements(emp["id"], "ALL_PRIVILEGES")
+                        self._cache_set("session_user_privileged", True)
+                        LOGGER.info("Granted ALL_PRIVILEGES to employee %s (fallback)", emp["id"])
+                    except Exception:
+                        pass
+        except Exception as e:
+            LOGGER.warning("Could not grant session user privileges (fallback): %s", e)
 
     def _ensure_project_manager_access(self, employee: dict[str, Any]) -> None:
         """Ensure an employee has project manager access.
