@@ -509,7 +509,7 @@ class TripletexService:
                     ),
                     pm_name=attrs.get("projectManagerName"),
                     pm_email=attrs.get("projectManagerEmail"),
-                    fixed_price=self._as_float(attrs.get("fixedPrice")),
+                    fixed_price=self._as_float(attrs.get("fixedPrice") or attrs.get("projectBudget")),
                 )
                 LOGGER.info("[PRE] Ensured project: %s", project_name)
             except Exception as e:
@@ -529,7 +529,7 @@ class TripletexService:
                             ),
                             pm_name=None,
                             pm_email=None,
-                            fixed_price=self._as_float(attrs.get("fixedPrice")),
+                            fixed_price=self._as_float(attrs.get("fixedPrice") or attrs.get("projectBudget")),
                         )
                         LOGGER.info("[PRE] Ensured project (default PM): %s", project_name)
                         # Now try to update the PM to the requested one
@@ -1765,7 +1765,7 @@ class TripletexService:
         project_name = task.attributes.get("projectName")
         if project_name:
             try:
-                fixed_price = task.attributes.get("fixedPrice")
+                fixed_price = task.attributes.get("fixedPrice") or task.attributes.get("projectBudget")
                 project = self._ensure_project(
                     name=project_name,
                     customer_name=customer_name,
