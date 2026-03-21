@@ -4918,9 +4918,8 @@ class TripletexService:
         self, customer_name: str, invoice_number: str, amount: float,
         payment_date: date, payment_type: dict[str, Any],
     ) -> None:
-        """Find customer invoice and register payment."""
+        """Find or create customer invoice and register payment."""
         # Find customer — filter for exact name match to avoid substring hits
-        # (e.g. "Vik AS" matching "Stølsvik AS")
         customers = self.client.search_customers(name=customer_name)
         exact = [c for c in customers if c.get("name", "").strip().lower() == customer_name.strip().lower()]
         if exact:
@@ -4929,8 +4928,9 @@ class TripletexService:
             LOGGER.warning("No exact customer match for %r, using closest: %r", customer_name, customers[0].get("name"))
             customer = customers[0]
         else:
-            LOGGER.warning("Customer %r not found for bank reconciliation, skipping", customer_name)
-            return
+            # Create customer on the fly (fresh account has no customers)
+            LOGGER.info("Customer %r not found, creating for bank reconciliation", customer_name)
+            customer = self._ensure_customer(customer_name)
 
         # Find invoice by number
         invoices = self.client.search_invoices(customer_id=customer["id"])
@@ -4959,8 +4959,27 @@ class TripletexService:
                     break
 
         if not target_invoice:
-            LOGGER.warning("No unpaid invoice found for customer %s (invoice %s), skipping", customer_name, invoice_number)
-            return
+            # No invoice exists — create one dated before the payment so it can be paid
+            LOGGER.info("No invoice found for customer %s, creating invoice for %.2f", customer_name, amount)
+            invoice_date = (payment_date - timedelta(days=14)).isoformat()
+            try:
+                self._ensure_invoice_bank_account()
+                order = self.client.create("/order", {
+                    "customer": {"id": customer["id"]},
+                    "orderDate": invoice_date,
+                    "deliveryDate": invoice_date,
+                    "orderLines": [{"description": f"Faktura {invoice_number}", "count": 1, "unitPriceExcludingVatCurrency": amount}],
+                })
+                inv_result = self.client.create_invoice_from_order(
+                    order["id"],
+                    invoice_date=invoice_date,
+                    send_to_customer=False,
+                )
+                target_invoice = inv_result
+                LOGGER.info("Created invoice for customer %s: id=%s", customer_name, inv_result.get("id"))
+            except Exception as e:
+                LOGGER.warning("Could not create invoice for customer %s: %s", customer_name, e)
+                return
 
         pay_amount = float(target_invoice.get("amountCurrencyOutstanding") or target_invoice.get("amountOutstanding") or amount)
         self.client.pay_invoice(
@@ -4974,7 +4993,7 @@ class TripletexService:
     def _reconcile_supplier_payment(
         self, supplier_name: str, amount: float, payment_date: date,
     ) -> None:
-        """Find supplier invoice and register payment."""
+        """Find or create supplier invoice and register payment."""
         # Find supplier — filter for exact name match
         suppliers = self.client.search_suppliers(name=supplier_name)
         exact = [s for s in suppliers if s.get("name", "").strip().lower() == supplier_name.strip().lower()]
@@ -4983,8 +5002,9 @@ class TripletexService:
         elif suppliers:
             supplier = suppliers[0]
         else:
-            LOGGER.warning("Supplier %r not found for bank reconciliation, skipping", supplier_name)
-            return
+            # Create supplier on the fly (fresh account has no suppliers)
+            LOGGER.info("Supplier %r not found, creating for bank reconciliation", supplier_name)
+            supplier = self._ensure_supplier(supplier_name)
 
         # Find unpaid supplier invoices
         try:
@@ -5002,6 +5022,22 @@ class TripletexService:
         if not target_invoice and invoices:
             target_invoice = invoices[0]
 
+        if not target_invoice:
+            # No supplier invoice found — create one, then pay it
+            LOGGER.info("No supplier invoice found for %s, creating incoming invoice for %.2f", supplier_name, amount)
+            invoice_date = (payment_date - timedelta(days=14)).isoformat()
+            try:
+                inv_payload: dict[str, Any] = {
+                    "invoiceDate": invoice_date,
+                    "dueDate": payment_date.isoformat(),
+                    "supplier": {"id": supplier["id"]},
+                    "description": f"Leverandørfaktura - {supplier_name}",
+                }
+                target_invoice = self.client.create("/incomingInvoice", inv_payload)
+                LOGGER.info("Created incoming invoice for supplier %s: id=%s", supplier_name, target_invoice.get("id"))
+            except Exception as e:
+                LOGGER.warning("Could not create incoming invoice for %s: %s. Falling back to voucher.", supplier_name, e)
+
         if target_invoice:
             try:
                 self.client.pay_supplier_invoice(
@@ -5014,7 +5050,7 @@ class TripletexService:
                 LOGGER.warning("Failed to pay supplier invoice for %s: %s. Creating voucher instead.", supplier_name, e)
                 self._reconcile_supplier_payment_voucher(supplier_name, supplier["id"], amount, payment_date)
         else:
-            # No supplier invoice found — create a voucher directly
+            # All invoice attempts failed — create a voucher directly
             self._reconcile_supplier_payment_voucher(supplier_name, supplier["id"], amount, payment_date)
 
     def _reconcile_supplier_payment_voucher(
