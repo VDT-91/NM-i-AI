@@ -376,7 +376,7 @@ class TripletexService:
             Entity.INCOMING_INVOICE: ("SMART", "APPROVE_VOUCHER"),
             Entity.PURCHASE_ORDER: ("SMART",),
             Entity.TRAVEL_EXPENSE: ("SMART",),
-            Entity.INVOICE: ("BASIS",),
+            # Entity.INVOICE — no module needed; activating can invalidate session
             Entity.BANK_STATEMENT: ("SMART", "APPROVE_VOUCHER"),
             Entity.DIVISION: ("SMART",),
             Entity.INVENTORY: ("LOGISTICS",),
@@ -388,11 +388,29 @@ class TripletexService:
             Entity.LEAVE_OF_ABSENCE: ("SMART",),
         }
         modules_needed = _entity_modules.get(entity, ())
+        module_newly_activated = False
         for mod in modules_needed:
             try:
-                self.client.activate_sales_module(mod)
+                result = self.client.activate_sales_module(mod)
+                if result is not None:  # None = already cached, dict = newly activated (201)
+                    module_newly_activated = True
             except Exception:
                 pass
+
+        # After module activation, the competition proxy may invalidate the session.
+        # Verify with a quick GET; if 401, re-fetch modules to "refresh" the session.
+        if module_newly_activated:
+            try:
+                self.client.list("/company", fields="id", params={"count": 1})
+            except TripletexAPIError as e:
+                if e.status_code == 401:
+                    LOGGER.warning("Session invalidated after module activation, retrying prefetch")
+                    # Re-prefetch to potentially refresh the session
+                    self.client._module_activation_cache.clear()
+                    try:
+                        self.client._prefetch_active_modules()
+                    except Exception:
+                        LOGGER.warning("Session still invalid after module activation — continuing anyway")
 
         # --- Ensure department ---
         department_name = attrs.get("departmentName")
