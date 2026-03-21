@@ -988,7 +988,7 @@ class ProjectRegressionTest(unittest.TestCase):
 
         self.assertEqual(
             client.activated,
-            ["SMART_PROJECT", "SMART"],
+            ["SMART_PROJECT", "SMART", "ACCOUNTING_OFFICE"],
         )
 
     def test_project_manager_access_upgrades_null_user_type(self) -> None:

@@ -404,7 +404,7 @@ class TripletexService:
 
         # --- Activate required modules based on entity type (GETs are free) ---
         _entity_modules = {
-            Entity.PROJECT: ("SMART_PROJECT", "SMART"),
+            Entity.PROJECT: ("SMART_PROJECT", "SMART", "ACCOUNTING_OFFICE"),
             Entity.TIMESHEET: ("SMART_TIME_TRACKING", "SMART"),
             Entity.SALARY_TRANSACTION: ("WAGE", "SMART"),
             # Entity.INCOMING_INVOICE  -- modules activated in handler; API is BETA/restricted
@@ -816,6 +816,11 @@ class TripletexService:
             return
         if task.entity is Entity.EVENT_SUBSCRIPTION:
             self._create_event_subscription(task)
+            return
+        if task.entity is Entity.PAYMENT:
+            # LLM sometimes classifies "register payment" as "create payment"
+            LOGGER.info("Redirecting create→register for payment entity")
+            self._register_payment(task)
             return
         raise UnsupportedTaskError(f"Create workflow for {task.entity.value} is not implemented")
 
@@ -1504,12 +1509,9 @@ class TripletexService:
         return None
 
     def _activate_project_module(self) -> None:
-        """Activate the module required for project creation.
-        Only SMART_PROJECT + SMART are used -- KOMPLETT/PROJECT/PROSJEKT
-        can invalidate session or break permissions.
-        """
+        """Activate the module required for project creation."""
         activated_any = False
-        for mod in ("SMART_PROJECT", "SMART"):
+        for mod in ("SMART_PROJECT", "SMART", "ACCOUNTING_OFFICE"):
             try:
                 self.client.activate_sales_module(mod)
                 LOGGER.info("Activated %s module for project creation", mod)
