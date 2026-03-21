@@ -41,6 +41,7 @@ ROLE_TO_USER_TYPE = {
     "auditor": "EXTENDED",
     "user": "STANDARD",
     "bruker": "STANDARD",
+    "standard": "STANDARD",
     "no_access": "NO_ACCESS",
 }
 
@@ -2122,6 +2123,13 @@ class TripletexService:
         self._create_invoice(task)
 
     def _create_travel_expense(self, task: ParsedTask) -> None:
+        # Activate travel-related modules
+        for mod in ("SMART", "APPROVE_VOUCHER"):
+            try:
+                self.client.activate_sales_module(mod)
+            except Exception:
+                pass
+
         employee_name = task.attributes.get("employeeName") or task.target_name
         employee_email = task.attributes.get("employeeEmail") or task.attributes.get("email")
         # Fallback: derive name from email if missing
@@ -2132,9 +2140,11 @@ class TripletexService:
             LOGGER.info("Derived employee name %r from email %r", employee_name, employee_email)
         if not employee_name:
             raise ParsingError("Could not extract employee name for travel expense")
+        # Travel expense requires employee with STANDARD access (not NO_ACCESS)
         employee = self._ensure_employee(
             name=employee_name,
             email=employee_email,
+            role="standard",
         )
         departure_date_val = task.attributes.get("departureDate")
         return_date_val = task.attributes.get("returnDate")
