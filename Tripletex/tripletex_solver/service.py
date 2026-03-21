@@ -1070,9 +1070,11 @@ class TripletexService:
                         if form_lower in ("permanent", "fast"):
                             form_update["employmentForm"] = "PERMANENT"
                             form_update["employmentType"] = "ORDINARY"
+                            form_update["workingHoursScheme"] = "NOT_SHIFT"
                         elif form_lower in ("temporary", "midlertidig"):
                             form_update["employmentForm"] = "TEMPORARY"
                             form_update["employmentType"] = "ORDINARY"
+                            form_update["workingHoursScheme"] = "NOT_SHIFT"
                     # Set percentage of full-time equivalent
                     if pct is not None:
                         form_update["percentageOfFullTimeEquivalent"] = float(pct)
