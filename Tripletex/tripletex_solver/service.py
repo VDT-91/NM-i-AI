@@ -1005,11 +1005,12 @@ class TripletexService:
                 LOGGER.warning("Could not grant %s entitlements: %s", entitlement_template, e)
 
         # startDate lives on the employment object, not the employee
+        # Note: salary is handled in the consolidated employment details block below
         if start_date or has_salary:
             self._update_employment(
                 employee["id"],
                 start_date=_parse_date_value(start_date).isoformat() if start_date else None,
-                salary_attrs=task.attributes if has_salary else None,
+                salary_attrs=None,  # salary set in consolidated details PUT below
                 dob_already_set=True,  # We set dateOfBirth in the payload above
             )
 
@@ -1036,7 +1037,7 @@ class TripletexService:
             try:
                 std_time_payload: dict[str, Any] = {
                     "employee": {"id": employee["id"]},
-                    "date": _parse_date_value(start_date).isoformat() if start_date else date.today().isoformat(),
+                    "fromDate": _parse_date_value(start_date).isoformat() if start_date else date.today().isoformat(),
                     "hoursPerDay": float(hours_per_day),
                 }
                 self.client.create_employee_standard_time(std_time_payload)
@@ -1044,13 +1045,18 @@ class TripletexService:
             except Exception as e:
                 LOGGER.warning("Could not set standard working time: %s", e)
 
-        # Employment details: form, percentage, STYRK, remuneration type
+        # Employment details: form, percentage, STYRK, remuneration type, salary
+        # IMPORTANT: Tripletex PUT replaces the entire entity, so we must send ALL
+        # fields in a single PUT to avoid overwriting previously-set values.
         employment_form = task.attributes.get("employmentForm")
         pct = task.attributes.get("percentageOfFullTimeEquivalent")
         styrk = task.attributes.get("occupationCode") or task.attributes.get("styrkCode") or task.attributes.get("professionCode")
         hourly = task.attributes.get("hourlyWage") or task.attributes.get("hourlyRate")
+        annual_salary = task.attributes.get("annualSalary")
+        monthly_salary = task.attributes.get("monthlySalary")
 
-        if employment_form or pct is not None or styrk or hourly:
+        needs_detail_update = employment_form or pct is not None or styrk or hourly or annual_salary or monthly_salary
+        if needs_detail_update:
             try:
                 employments = self.client.list(
                     "/employee/employment",
@@ -1061,60 +1067,85 @@ class TripletexService:
                     emp = employments[0]
                     details = self.client.list(
                         "/employee/employment/details",
-                        fields="id,employmentForm,employmentType,remunerationType,workingHoursScheme,percentageOfFullTimeEquivalent,occupationCode(id,code)",
+                        fields="id,employmentForm,employmentType,remunerationType,workingHoursScheme,percentageOfFullTimeEquivalent,annualSalary,monthlySalary,hourlyWage,occupationCode(id,code)",
                         params={"employmentId": emp["id"], "count": 1},
                     )
-                    form_update: dict[str, Any] = {}
-                    if employment_form:
-                        form_lower = employment_form.lower()
-                        if form_lower in ("permanent", "fast"):
-                            form_update["employmentForm"] = "PERMANENT"
-                            form_update["employmentType"] = "ORDINARY"
-                            form_update["workingHoursScheme"] = "NOT_SHIFT"
-                        elif form_lower in ("temporary", "midlertidig"):
-                            form_update["employmentForm"] = "TEMPORARY"
-                            form_update["employmentType"] = "ORDINARY"
-                            form_update["workingHoursScheme"] = "NOT_SHIFT"
-                    # Set percentage of full-time equivalent
-                    if pct is not None:
-                        form_update["percentageOfFullTimeEquivalent"] = float(pct)
-                    # Set STYRK/occupation code — look up by code to get internal ID
-                    if styrk:
-                        styrk_str = str(styrk).strip()
-                        try:
-                            occ_codes = self.client.list(
-                                "/employee/employment/occupationCode",
-                                fields="id,code,nameNO",
-                                params={"code": styrk_str, "count": 5},
-                            )
-                            if occ_codes:
-                                # Exact match on code
-                                exact = next((o for o in occ_codes if o.get("code") == styrk_str), occ_codes[0])
-                                form_update["occupationCode"] = {"id": exact["id"]}
-                                LOGGER.info("Resolved STYRK %s → id=%d (%s)", styrk_str, exact["id"], exact.get("nameNO"))
-                            else:
-                                LOGGER.warning("STYRK code %s not found", styrk_str)
-                        except Exception as e:
-                            LOGGER.warning("Could not look up STYRK code %s: %s", styrk_str, e)
-                    if form_update and details:
+                    if details:
                         detail_id = details[0]["id"]
-                        # First update: form, type, percentage, STYRK (without remunerationType)
-                        try:
-                            self.client.update("/employee/employment/details", detail_id, form_update)
-                            LOGGER.info("Updated employment details for employee %s: %s",
-                                        employee["id"], list(form_update.keys()))
-                        except TripletexAPIError as e:
-                            LOGGER.warning("Could not update employment form: %s", e)
-                        # Second update: remunerationType separately (sometimes fails with type error)
-                        rem_type = "HOURLY_WAGE" if hourly else "MONTHLY_WAGE" if employment_form else None
+                        # Start with existing values to preserve them across PUT
+                        existing = details[0]
+                        detail_update: dict[str, Any] = {}
+                        # Preserve existing non-null values
+                        for keep_field in ("employmentForm", "employmentType", "workingHoursScheme",
+                                           "percentageOfFullTimeEquivalent", "annualSalary", "monthlySalary",
+                                           "hourlyWage", "remunerationType"):
+                            if existing.get(keep_field) is not None:
+                                detail_update[keep_field] = existing[keep_field]
+                        if existing.get("occupationCode") and existing["occupationCode"].get("id"):
+                            detail_update["occupationCode"] = {"id": existing["occupationCode"]["id"]}
+
+                        # Now overlay new values
+                        if employment_form:
+                            form_lower = employment_form.lower()
+                            if form_lower in ("permanent", "fast"):
+                                detail_update["employmentForm"] = "PERMANENT"
+                                detail_update["employmentType"] = "ORDINARY"
+                                detail_update["workingHoursScheme"] = "NOT_SHIFT"
+                            elif form_lower in ("temporary", "midlertidig"):
+                                detail_update["employmentForm"] = "TEMPORARY"
+                                detail_update["employmentType"] = "ORDINARY"
+                                detail_update["workingHoursScheme"] = "NOT_SHIFT"
+                        if pct is not None:
+                            detail_update["percentageOfFullTimeEquivalent"] = float(pct)
+                        if annual_salary is not None:
+                            detail_update["annualSalary"] = float(annual_salary)
+                        if monthly_salary is not None:
+                            detail_update["monthlySalary"] = float(monthly_salary)
+                        if hourly is not None:
+                            detail_update["hourlyWage"] = float(hourly)
+                        # Remuneration type
+                        rem_type = "HOURLY_WAGE" if hourly else "MONTHLY_WAGE" if (employment_form or annual_salary or monthly_salary) else None
                         if rem_type:
+                            detail_update["remunerationType"] = rem_type
+                        # STYRK/occupation code
+                        if styrk:
+                            styrk_str = str(styrk).strip()
                             try:
-                                self.client.update("/employee/employment/details", detail_id, {
-                                    "remunerationType": rem_type,
-                                })
-                                LOGGER.info("Set remunerationType=%s for employee %s", rem_type, employee["id"])
-                            except Exception as e2:
-                                LOGGER.warning("Could not set remunerationType: %s (non-critical)", e2)
+                                occ_codes = self.client.list(
+                                    "/employee/employment/occupationCode",
+                                    fields="id,code,nameNO",
+                                    params={"code": styrk_str, "count": 5},
+                                )
+                                if occ_codes:
+                                    exact = next((o for o in occ_codes if o.get("code") == styrk_str), occ_codes[0])
+                                    detail_update["occupationCode"] = {"id": exact["id"]}
+                                    LOGGER.info("Resolved STYRK %s → id=%d (%s)", styrk_str, exact["id"], exact.get("nameNO"))
+                                else:
+                                    LOGGER.warning("STYRK code %s not found", styrk_str)
+                            except Exception as e:
+                                LOGGER.warning("Could not look up STYRK code %s: %s", styrk_str, e)
+
+                        # Single PUT with all fields to avoid overwriting
+                        if detail_update:
+                            try:
+                                self.client.update("/employee/employment/details", detail_id, detail_update)
+                                LOGGER.info("Updated employment details for employee %s: %s",
+                                            employee["id"], list(detail_update.keys()))
+                            except TripletexAPIError as e:
+                                LOGGER.warning("Could not update employment details: %s", e)
+                                # If it fails with remunerationType, retry without it
+                                if "remunerationType" in detail_update:
+                                    rem = detail_update.pop("remunerationType")
+                                    try:
+                                        self.client.update("/employee/employment/details", detail_id, detail_update)
+                                        LOGGER.info("Updated employment details without remunerationType")
+                                        # Try remunerationType alone
+                                        try:
+                                            self.client.update("/employee/employment/details", detail_id, {"remunerationType": rem})
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        pass
             except Exception as e:
                 LOGGER.warning("Could not update employment details: %s", e)
 
