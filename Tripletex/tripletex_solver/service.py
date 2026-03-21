@@ -3288,38 +3288,20 @@ class TripletexService:
                 if abs(current_depr - expected_gross) > 1.0:
                     continue  # Not matching this asset
 
-                # Query the actual balance on the asset account
-                try:
-                    asset_accts = self.client.search_accounts_by_number(asset_acct_num)
-                    if not asset_accts:
-                        continue
-                    asset_acct_id = asset_accts[0]["id"]
-                    year = voucher_date.year
-                    asset_postings = self.client.search_ledger_postings(
-                        date_from=f"{year}-01-01",
-                        date_to=f"{year}-12-31",
-                        account_id=asset_acct_id,
+                # Use the prompt-provided cost/years for depreciation (don't adjust
+                # based on book value — the competition expects cost/years)
+                correct_depr = round(prompt_cost / years, 2)
+                if abs(current_depr - correct_depr) > 0.01:
+                    LOGGER.info(
+                        "Correcting depreciation for asset %d: was=%.2f, should=%.2f (cost=%.2f/years=%d)",
+                        asset_acct_num, current_depr, correct_depr, prompt_cost, years
                     )
-                    book_value = sum(float(p.get("amount", 0)) for p in asset_postings)
-                    if book_value > 0 and abs(book_value - prompt_cost) > 1.0:
-                        # Book value differs from prompt cost (likely ex-VAT)
-                        correct_depr = round(book_value / years, 2)
-                        LOGGER.info(
-                            "Adjusting depreciation for asset %d: prompt_cost=%.2f, "
-                            "book_value=%.2f, old_depr=%.2f → new_depr=%.2f",
-                            asset_acct_num, prompt_cost, book_value, current_depr, correct_depr
-                        )
-                        debit_p["amountGross"] = correct_depr
-                        debit_p["amountGrossCurrency"] = correct_depr
-                        credit_p["amountGross"] = -correct_depr
-                        credit_p["amountGrossCurrency"] = -correct_depr
-                    else:
-                        LOGGER.info(
-                            "Asset %d book_value=%.2f matches prompt_cost=%.2f, no adjustment",
-                            asset_acct_num, book_value, prompt_cost
-                        )
-                except Exception as e:
-                    LOGGER.warning("Could not query asset %d balance: %s", asset_acct_num, e)
+                    debit_p["amountGross"] = correct_depr
+                    debit_p["amountGrossCurrency"] = correct_depr
+                    credit_p["amountGross"] = -correct_depr
+                    credit_p["amountGrossCurrency"] = -correct_depr
+                else:
+                    LOGGER.info("Asset %d depreciation %.2f matches prompt cost/years", asset_acct_num, current_depr)
                 break  # Found matching asset
 
     def _correct_prepaid_expense_in_postings(
