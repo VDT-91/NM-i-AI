@@ -79,6 +79,30 @@ ACTION_KEYWORDS: dict[Action, tuple[str, ...]] = {
         "executez",
         "pay",
         "betal",
+        "utfør",
+        "utfor",
+        "gjennomfør",
+        "gjennomfor",
+        "gjer",
+        "führen",
+        "fuhren",
+        "durchführen",
+        "buchen",
+        "bokfør",
+        "bokfor",
+        "realize",
+        "realice",
+        "reconcili",
+        "encontre",
+        "encuentre",
+        "finden",
+        "beregn",
+        "rekn",
+        "efectúe",
+        "efectue",
+        "effectuez",
+        "réalisez",
+        "réaliser",
     ),
     Action.UPDATE: (
         "update",
@@ -128,19 +152,29 @@ ENTITY_KEYWORDS: dict[Entity, tuple[str, ...]] = {
         "kund",
     ),
     Entity.DEPARTMENT: (
+        "departments",
         "department",
+        "avdelingene",
         "avdelingar",
         "avdelinger",
         "avdeling",
+        "departamentos",
         "departamento",
         "departement",
+        "abteilungen",
         "abteilung",
     ),
     Entity.PRODUCT: (
+        "products",
         "product",
+        "produktene",
+        "produkter",
         "produkt",
+        "productos",
         "producto",
+        "produtos",
         "produto",
+        "produits",
         "produit",
     ),
     Entity.PROJECT: (
@@ -203,6 +237,20 @@ ENTITY_KEYWORDS: dict[Entity, tuple[str, ...]] = {
         "bon",
         "beleg",
         "buchungsbeleg",
+        "monatsabschluss",
+        "månedsslutt",
+        "månedsavslutning",
+        "month-end closing",
+        "årsoppgjør",
+        "arsoppgjor",
+        "årsoppgjer",
+        "year-end closing",
+        "jahresabschluss",
+        "encerramento anual",
+        "cierre anual",
+        "cierre mensual",
+        "clôture annuelle",
+        "clôture mensuelle",
     ),
     Entity.TIMESHEET: (
         "hours",
@@ -268,7 +316,10 @@ ENTITY_KEYWORDS: dict[Entity, tuple[str, ...]] = {
         "bankavstemming",
         "kontoauszug",
         "extracto bancario",
+        "extrato bancário",
+        "extrato bancario",
         "relevé bancaire",
+        "reconcili",
     ),
     Entity.DIMENSION: (
         "dimension",
@@ -302,9 +353,18 @@ ENTITY_KEYWORDS: dict[Entity, tuple[str, ...]] = {
         "purring",
         "inkasso",
         "mahnung",
+        "mahngebühr",
+        "mahngebuhr",
         "rappel",
         "recordatorio",
         "dunning",
+        "overdue invoice",
+        "überfällige rechnung",
+        "uberfallige rechnung",
+        "factura vencida",
+        "fatura vencida",
+        "forfalt faktura",
+        "forfallen faktura",
     ),
     Entity.ACTIVITY: (
         "activity",
@@ -510,10 +570,16 @@ DEPARTMENT_LINK_KEYWORDS = (
 )
 
 PRODUCT_LINK_KEYWORDS = (
+    "products",
     "product",
+    "produktene",
+    "produkter",
     "produkt",
+    "productos",
     "producto",
+    "produtos",
     "produto",
+    "produits",
     "produit",
     "item",
     "line item",
@@ -679,6 +745,19 @@ def _strip_parenthetical(text: str) -> str:
     text = re.sub(r"\s*\([^)]*\)", "", text)
     text = re.sub(r"\s*\(.*$", "", text)
     return text.strip()
+
+
+def _extract_raw_after_keywords(prompt: str, keywords: Iterable[str]) -> str | None:
+    """Like _extract_after_keywords but returns raw text without _clean_segment trimming."""
+    for keyword in keywords:
+        pattern = re.compile(
+            rf"\b{re.escape(keyword)}\b\s*(?:is|er|est|ist|es|=|:)?\s+(?P<value>[^.\n]+)",
+            re.IGNORECASE,
+        )
+        match = pattern.search(prompt)
+        if match:
+            return match.group("value").strip()
+    return None
 
 
 def _extract_after_keywords(prompt: str, keywords: Iterable[str]) -> str | None:
@@ -970,11 +1049,25 @@ def _split_person_name(name: str) -> tuple[str, str]:
 class PromptParser:
     def parse(self, prompt: str) -> ParsedTask:
         normalized = _normalize(prompt)
+        norm_ascii = _normalize_ascii(prompt)
         action = self._detect_action(normalized)
         if action is Action.CREATE and _contains_any(normalized, CREDIT_NOTE_KEYWORDS):
             entity = Entity.INVOICE
         else:
             entity = self._detect_entity(normalized)
+
+        # Priority overrides: certain keyword combos should force entity type
+        _REMINDER_FORCE_KEYWORDS = (
+            "mahngebuhr", "overdue invoice", "forfalt faktura",
+            "factura vencida", "fatura vencida", "uberfallige rechnung",
+            "purring", "inkasso", "reminder fee", "cargo por recordatorio",
+            "forfallen faktura",
+        )
+        if entity not in (Entity.REMINDER, Entity.VOUCHER, Entity.BANK_STATEMENT) and any(
+            kw in norm_ascii for kw in _REMINDER_FORCE_KEYWORDS
+        ):
+            entity = Entity.REMINDER
+            action = Action.CREATE
 
         # REGISTER action targets PAYMENT unless an incoming-invoice keyword was found
         if action is Action.REGISTER:
@@ -1146,6 +1239,17 @@ class PromptParser:
             task.attributes["name"] = quoted_names[0]
             task.attributes["names"] = quoted_names
             return task
+        # Handle unquoted comma/and-separated names like "X, Y og Z" or "X, Y and Z"
+        if task.action is Action.CREATE and not price and not product_number:
+            raw_after = _extract_raw_after_keywords(prompt, ENTITY_KEYWORDS[Entity.PRODUCT])
+            if raw_after:
+                parts = re.split(r",\s*(?:og|and|und|y|et|e)?\s*|\s+og\s+|\s+and\s+|\s+und\s+|\s+y\s+|\s+et\s+", raw_after)
+                parts = [p.strip().strip(",.;: ") for p in parts if p.strip().strip(",.;: ")]
+                if len(parts) > 1:
+                    task.target_name = parts[0]
+                    task.attributes["name"] = parts[0]
+                    task.attributes["names"] = parts
+                    return task
         if not effective_name and task.action is Action.CREATE:
             raise ParsingError("Could not extract product name from prompt")
         if effective_name:
@@ -1444,7 +1548,8 @@ class PromptParser:
             task.attributes["creditAccountNumber"] = credit_account
 
         if task.action is Action.CREATE and not description:
-            raise ParsingError("Could not extract voucher description from prompt")
+            # Use a default description for month-end/year-end closing tasks
+            task.attributes["description"] = "Journal entry"
 
         return task
 

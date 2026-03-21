@@ -512,6 +512,83 @@ tests = [
     # =========================================================================
     ("47_TIME_INV_NO", "Registrer 40 timer for ansatt Kari Nordmann på prosjekt Digital Transformasjon, aktivitet Utvikling, uke 12 2026. Fakturer deretter kunden Nordlys AS for timene med timepris 1200 kr ekskl. mva."),
     ("47_TIME_INV_EN", "Register 40 hours for employee John Smith on project Digital Transformation, activity Development, week 12 2026. Then invoice customer Arctic Solutions Ltd for the hours at hourly rate 1200 NOK excl VAT."),
+
+    # =========================================================================
+    # 48. ORDER → INVOICE → PAYMENT (Tier 3 — multi-step in various languages)
+    # =========================================================================
+    ("48_ORD_INV_PAY_ES", "Crea un pedido para el cliente Dorada SL (org. nº 984411359) con los productos Desarrollo de sistemas (5240) a 21950 NOK y Sesión de formación (5871) a 6350 NOK. Convierte el pedido en factura y registra el pago completo."),
+    ("48_ORD_INV_PAY_NO", "Opprett en ordre for kunden Havbris AS (org.nr 912345678) med produktene Konsulenttime (1001) til 1500 NOK og Reisekostnad (1002) til 3500 NOK. Fakturer ordren og registrer full betaling."),
+    ("48_ORD_INV_PAY_EN", "Create an order for customer Northern Lights Ltd (org. no. 876543210) with products Software License (2001) at 25000 NOK and Support Package (2002) at 8000 NOK. Convert to invoice and register full payment."),
+    ("48_ORD_INV_PAY_PT", "Crie um pedido para o cliente Oceano Azul Lda (org. nº 945678123) com os produtos Consultoria (3001) a 18000 NOK e Formação (3002) a 5000 NOK. Converta em fatura e registe o pagamento total."),
+    ("48_ORD_INV_PAY_DE", "Erstelle einen Auftrag für den Kunden Alpenblick GmbH (Org.-Nr. 923456789) mit den Produkten Beratung (4001) zu 15000 NOK und Schulung (4002) zu 7500 NOK. In Rechnung stellen und vollständige Zahlung erfassen."),
+
+    # =========================================================================
+    # 49. ORDER → INVOICE only (Tier 2 — no payment)
+    # =========================================================================
+    ("49_ORD_INV_NO", "Opprett en bestilling til kunden Fjelltopp AS med et produkt Webdesign til 45000 NOK. Gjør om bestillingen til faktura."),
+    ("49_ORD_INV_EN", "Create an order for customer Mountain View Inc with product Cloud Hosting at 12000 NOK. Convert the order into an invoice."),
+    ("49_ORD_INV_ES", "Crea un pedido para el cliente Sierra Digital SL con el producto Alojamiento web a 9500 NOK. Convierte el pedido en factura."),
+
+    # =========================================================================
+    # 50. PROJECT INVOICE — timesheet hours in various languages (Tier 3)
+    # =========================================================================
+    ("50_PROJ_INV_PT", "Registe 35 horas para Inês Ferreira (ines.ferreira@example.org) na atividade Testing do projeto Configuração cloud para Floresta Lda (org. nº 949247589). Taxa horária: 1000 NOK/h. Gere uma fatura de projeto ao cliente com base nas horas registadas."),
+    ("50_PROJ_INV_ES", "Registre 20 horas para María López (maria.lopez@example.org) en la actividad Diseño del proyecto Rediseño web para Costa Digital SL (org. nº 934567890). Tarifa: 1500 NOK/h. Genere una factura del proyecto al cliente."),
+    ("50_PROJ_INV_DE", "Erfassen Sie 25 Stunden für Klaus Weber (klaus.weber@example.org) in der Aktivität Entwicklung des Projekts App-Modernisierung für Bergwerk GmbH (Org.-Nr. 956789012). Stundensatz: 1200 NOK/h. Erstellen Sie eine Projektrechnung an den Kunden."),
+    ("50_PROJ_INV_NO", "Registrer 30 timer for Ola Nordmann (ola@example.org) på aktiviteten Analyse i prosjektet Systemintegrasjon for Kystbyen AS (org.nr 967890123). Timepris: 1400 NOK/h. Lag en prosjektfaktura til kunden basert på timene."),
+
+    # =========================================================================
+    # 51. SALARY WITH BONUS — various languages (Tier 2)
+    # =========================================================================
+    ("51_SAL_BONUS_ES", "Ejecute la nómina de Fernando García (fernando.garcia@example.org) para este mes. El salario base es de 55350 NOK. Añada una bonificación única de 14600 NOK además del salario base."),
+    ("51_SAL_BONUS_NO", "Kjør lønnsbilag for ansatt Kari Nordmann (kari@firma.no) for denne måneden. Grunnlønn er 48000 NOK. Legg til en engangsbonus på 10000 NOK i tillegg til grunnlønnen."),
+    ("51_SAL_BONUS_EN", "Run salary transaction for employee John Smith (john@company.com) for this month. Base salary is 52000 NOK. Add a one-time bonus of 12000 NOK on top of the base salary."),
+    ("51_SAL_BONUS_DE", "Gehaltsabrechnung für Mitarbeiter Hans Müller (hans@firma.de) für diesen Monat erstellen. Grundgehalt beträgt 50000 NOK. Einen einmaligen Bonus von 15000 NOK hinzufügen."),
+
+    # =========================================================================
+    # 52. EMPLOYEE WITH FULL DETAILS — DOB, address, salary, NIN (Tier 2)
+    # =========================================================================
+    ("52_EMP_FULL_NO", "Opprett ansatt Ola Hansen, født 15. juni 1990, personnummer 15069012345. Adresse: Storgata 10, 0182 Oslo. Årslønn 650000 kr. Stillingsprosent 100%. Startdato 2026-01-15. E-post ola.hansen@firma.no."),
+    ("52_EMP_FULL_EN", "Create employee Jane Doe, born March 22, 1988, national ID 22038812345. Address: King Street 5, 0153 Oslo. Annual salary 580000 NOK. Full-time (100%). Start date 2026-02-01. Email jane.doe@company.com."),
+    ("52_EMP_FULL_ES", "Crear empleado Pedro Martínez, nacido el 10 de octubre de 1992, número de identidad 10109212345. Dirección: Calle Principal 8, 0161 Oslo. Salario anual 600000 NOK. Jornada completa. Fecha de inicio 2026-03-01. Email pedro@empresa.es."),
+
+    # =========================================================================
+    # 53. TRAVEL EXPENSE WITH EXPENSES + PER DIEM (Tier 3)
+    # =========================================================================
+    ("53_TRAVEL_FULL_NO", "Opprett reiseregning for Kari Nordmann (kari@firma.no). Reise fra Oslo til Bergen, avreise 2026-03-10, retur 2026-03-14. Formål: Kundemøte. Diett med dagsats 800 kr i 4 dager. Utlegg: Flybillett 3800 kr, Taxi 450 kr, Hotell 6200 kr."),
+    ("53_TRAVEL_FULL_EN", "Create a travel expense for John Smith (john@company.com). Travel from Oslo to Tromsø, departure 2026-04-01, return 2026-04-05. Purpose: Conference. Per diem at 750 NOK/day for 4 days. Expenses: Flight 4200 NOK, Hotel 8500 NOK, Taxi 600 NOK."),
+    ("53_TRAVEL_FULL_ES", "Cree un informe de gastos de viaje para Carlos García (carlos@empresa.es). Viaje de Oslo a Stavanger, salida 2026-05-15, regreso 2026-05-18. Propósito: Formación. Dietas a 700 NOK/día durante 3 días. Gastos: Vuelo 2800 NOK, Taxi 350 NOK."),
+
+    # =========================================================================
+    # 54. FIXED-PRICE PROJECT + MILESTONE INVOICE (Tier 3)
+    # =========================================================================
+    ("54_FIXED_PROJ_NO", "Opprett et fastprisprosjekt kalt Nettsideredesign for kunde Nordlys AS med totalbeløp 150000 kr ekskl. mva. Prosjektleder er Kari Nordmann. Fakturer kunden 25% av totalbeløpet som første milepæl."),
+    ("54_FIXED_PROJ_EN", "Create a fixed-price project called Website Redesign for customer Arctic Solutions Ltd with total amount 150000 NOK excl VAT. Project manager is John Smith. Invoice customer 25% of total as first milestone."),
+    ("54_FIXED_PROJ_ES", "Cree un proyecto de precio fijo llamado Rediseño Web para el cliente Sol Digital SL por un total de 200000 NOK sin IVA. Gerente del proyecto: Carlos García. Facturar al cliente el 30% del total como primer hito."),
+
+    # =========================================================================
+    # 55. NEXT OF KIN (Tier 2)
+    # =========================================================================
+    ("55_NOK_NO", "Legg til pårørende for ansatt Kari Nordmann. Pårørende er Ola Nordmann, telefon 99887766, ektefelle."),
+    ("55_NOK_EN", "Add next of kin for employee John Smith. Next of kin is Jane Smith, phone +47 91234567, spouse."),
+
+    # =========================================================================
+    # 56. LEAVE OF ABSENCE — various types (Tier 2)
+    # =========================================================================
+    ("56_LEAVE_PARENTAL_NO", "Registrer foreldrepermisjon for ansatt Kari Nordmann fra 2026-06-01 til 2026-12-31. 100% permisjon."),
+    ("56_LEAVE_PARENTAL_EN", "Register parental leave for employee John Smith from 2026-06-01 to 2026-12-31. Full leave (100%)."),
+
+    # =========================================================================
+    # 57. CUSTOMER CATEGORY (Tier 2)
+    # =========================================================================
+    ("57_CUSTCAT_NO", "Opprett kundekategori VIP med nummer 1."),
+    ("57_CUSTCAT_EN", "Create customer category Premium with number 2."),
+
+    # =========================================================================
+    # 58. EMPLOYEE CATEGORY (Tier 2)
+    # =========================================================================
+    ("58_EMPCAT_NO", "Opprett ansattkategori Fulltid med nummer 1."),
+    ("58_EMPCAT_EN", "Create employee category Part-time with number 2."),
 ]
 
 

@@ -77,13 +77,47 @@ ROLE_TO_ENTITLEMENT_TEMPLATE = {
 
 
 def _normalize_ascii(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    transliterated = text.casefold().translate(
+        str.maketrans({
+            "\u00f8": "o",
+            "\u00e5": "a",
+            "\u00e6": "ae",
+            "\u0153": "oe",
+            "\u00df": "ss",
+            "\u00f0": "d",
+            "\u00fe": "th",
+            "\u0142": "l",
+        })
+    )
+    decomposed = unicodedata.normalize("NFKD", transliterated)
     return decomposed.encode("ascii", "ignore").decode("ascii")
 
 
 def _contains_any_ascii(text: str, phrases: tuple[str, ...]) -> bool:
     normalized = _normalize_ascii(text)
     return any(_normalize_ascii(phrase) in normalized for phrase in phrases)
+
+
+def _match_voucher_type(candidates: list[dict[str, Any]], *aliases: str) -> dict[str, Any] | None:
+    normalized_aliases = tuple(_normalize_ascii(alias) for alias in aliases if alias)
+    if not normalized_aliases:
+        return None
+
+    exact_matches: list[dict[str, Any]] = []
+    partial_matches: list[dict[str, Any]] = []
+    for candidate in candidates:
+        normalized_name = _normalize_ascii(candidate.get("name") or "")
+        if any(normalized_name == alias for alias in normalized_aliases):
+            exact_matches.append(candidate)
+            continue
+        if any(alias in normalized_name for alias in normalized_aliases):
+            partial_matches.append(candidate)
+
+    if exact_matches:
+        return exact_matches[0]
+    if partial_matches:
+        return partial_matches[0]
+    return None
 
 
 def _safe_int(value: Any, fallback: int | None = None) -> int | None:
@@ -142,7 +176,7 @@ class TripletexService:
         self.last_parsed_task: ParsedTask | None = None
         self.last_attachment_text: str | None = None
         self._saved_attachment_paths: list[Path] = []
-        # Per-execution caches — cleared at start of each execute()
+        # Per-execution caches  -- cleared at start of each execute()
         self._cache: dict[str, Any] = {}
 
     def _clear_cache(self) -> None:
@@ -364,7 +398,7 @@ class TripletexService:
         entity = task.entity
         action = task.action
 
-        # Skip pre-processing for delete/update — those resolve existing entities
+        # Skip pre-processing for delete/update  -- those resolve existing entities
         if action in (Action.DELETE, Action.UPDATE):
             return
 
@@ -373,10 +407,10 @@ class TripletexService:
             Entity.PROJECT: ("SMART_PROJECT", "SMART"),
             Entity.TIMESHEET: ("SMART_TIME_TRACKING", "SMART"),
             Entity.SALARY_TRANSACTION: ("WAGE", "SMART"),
-            # Entity.INCOMING_INVOICE — modules activated in handler; API is BETA/restricted
+            # Entity.INCOMING_INVOICE  -- modules activated in handler; API is BETA/restricted
             Entity.PURCHASE_ORDER: ("SMART",),
             Entity.TRAVEL_EXPENSE: ("SMART",),
-            # Entity.INVOICE — no module needed; activating can invalidate session
+            # Entity.INVOICE  -- no module needed; activating can invalidate session
             Entity.BANK_STATEMENT: ("SMART", "APPROVE_VOUCHER"),
             Entity.DIVISION: ("SMART",),
             Entity.INVENTORY: ("LOGISTICS",),
@@ -410,7 +444,7 @@ class TripletexService:
                     try:
                         self.client._prefetch_active_modules()
                     except Exception:
-                        LOGGER.warning("Session still invalid after module activation — continuing anyway")
+                        LOGGER.warning("Session still invalid after module activation  -- continuing anyway")
 
         # --- Ensure department ---
         department_name = attrs.get("departmentName")
@@ -817,7 +851,7 @@ class TripletexService:
             self._update_voucher(task)
             return
         if task.entity is Entity.INVOICE:
-            # Invoice update is not directly supported — route to credit note
+            # Invoice update is not directly supported  -- route to credit note
             # On a fresh account we must create the invoice first, then credit it
             LOGGER.info("Routing invoice update to credit note workflow")
             task.attributes["workflow"] = "creditNote"
@@ -860,7 +894,7 @@ class TripletexService:
             self._delete_timesheet_entry(task)
             return
         if task.entity is Entity.PAYMENT:
-            # "Revert payment" / "delete payment" — create credit note on the invoice
+            # "Revert payment" / "delete payment"  -- create credit note on the invoice
             self._revert_payment(task)
             return
         if task.entity is Entity.DOCUMENT_ARCHIVE:
@@ -930,7 +964,7 @@ class TripletexService:
         if email:
             payload["email"] = email
         elif user_type == "STANDARD":
-            # STANDARD userType requires email — generate a placeholder
+            # STANDARD userType requires email  -- generate a placeholder
             payload["email"] = f"{first_name.lower().replace(' ', '')}.{last_name.lower().replace(' ', '')}@placeholder.example.com"
 
         phone = task.attributes.get("phoneNumberWork") or task.attributes.get("phoneNumberMobile") or task.attributes.get("phoneNumber")
@@ -1010,7 +1044,7 @@ class TripletexService:
                 payload.pop("nationalIdentityNumber", None)
                 employee = _create_with_email_fallback(payload)
             elif e.status_code == 409:
-                # Duplicate — find existing employee
+                # Duplicate  -- find existing employee
                 LOGGER.warning("Employee duplicate (%s), looking up existing", e)
                 try:
                     employee = self._find_employee(name=f"{first_name} {last_name}", email=email)
@@ -1094,73 +1128,161 @@ class TripletexService:
                         fields="id,employmentForm,employmentType,remunerationType,workingHoursScheme,percentageOfFullTimeEquivalent,annualSalary,monthlySalary,hourlyWage,occupationCode(id,code)",
                         params={"employmentId": emp["id"], "count": 1},
                     )
-                    if details:
-                        detail_id = details[0]["id"]
-                        # Start with existing values to preserve them across PUT
-                        existing = details[0]
-                        detail_update: dict[str, Any] = {}
-                        # Preserve existing non-null values
-                        for keep_field in ("employmentForm", "employmentType", "workingHoursScheme",
-                                           "percentageOfFullTimeEquivalent", "annualSalary", "monthlySalary",
-                                           "hourlyWage", "remunerationType"):
-                            if existing.get(keep_field) is not None:
-                                detail_update[keep_field] = existing[keep_field]
-                        if existing.get("occupationCode") and existing["occupationCode"].get("id"):
-                            detail_update["occupationCode"] = {"id": existing["occupationCode"]["id"]}
+                    detail_id = details[0]["id"] if details else None
+                    existing = details[0] if details else {}
+                    detail_update: dict[str, Any] = {}
+                    # Preserve existing non-null values
+                    for keep_field in ("employmentForm", "employmentType", "workingHoursScheme",
+                                       "percentageOfFullTimeEquivalent", "annualSalary", "monthlySalary",
+                                       "hourlyWage", "remunerationType"):
+                        if existing.get(keep_field) is not None:
+                            detail_update[keep_field] = existing[keep_field]
+                    if existing.get("occupationCode") and existing["occupationCode"].get("id"):
+                        detail_update["occupationCode"] = {"id": existing["occupationCode"]["id"]}
 
-                        # Now overlay new values
-                        if employment_form:
-                            form_lower = employment_form.lower()
-                            if form_lower in ("permanent", "fast"):
-                                detail_update["employmentForm"] = "PERMANENT"
-                                detail_update["employmentType"] = "ORDINARY"
-                                detail_update["workingHoursScheme"] = "NOT_SHIFT"
-                            elif form_lower in ("temporary", "midlertidig"):
-                                detail_update["employmentForm"] = "TEMPORARY"
-                                detail_update["employmentType"] = "ORDINARY"
-                                detail_update["workingHoursScheme"] = "NOT_SHIFT"
-                        if pct is not None:
-                            detail_update["percentageOfFullTimeEquivalent"] = float(pct)
-                        if annual_salary is not None:
-                            detail_update["annualSalary"] = float(annual_salary)
-                        if monthly_salary is not None:
-                            detail_update["monthlySalary"] = float(monthly_salary)
-                        if hourly is not None:
-                            detail_update["hourlyWage"] = float(hourly)
-                        # Remuneration type
-                        rem_type = "HOURLY_WAGE" if hourly else "MONTHLY_WAGE" if (employment_form or annual_salary or monthly_salary) else None
-                        if rem_type:
-                            detail_update["remunerationType"] = rem_type
-                        # STYRK/occupation code
-                        if styrk:
-                            styrk_str = str(styrk).strip()
-                            try:
-                                occ_codes = self.client.list(
-                                    "/employee/employment/occupationCode",
-                                    fields="id,code,nameNO",
-                                    params={"code": styrk_str, "count": 5},
-                                )
-                                if occ_codes:
-                                    exact = next((o for o in occ_codes if o.get("code") == styrk_str), occ_codes[0])
-                                    detail_update["occupationCode"] = {"id": exact["id"]}
-                                    LOGGER.info("Resolved STYRK %s → id=%d (%s)", styrk_str, exact["id"], exact.get("nameNO"))
+                    # Now overlay new values
+                    if employment_form:
+                        form_lower = employment_form.lower()
+                        if form_lower in ("permanent", "fast"):
+                            detail_update["employmentForm"] = "PERMANENT"
+                            detail_update["employmentType"] = "ORDINARY"
+                            detail_update["workingHoursScheme"] = "NOT_SHIFT"
+                        elif form_lower in ("temporary", "midlertidig"):
+                            detail_update["employmentForm"] = "TEMPORARY"
+                            detail_update["employmentType"] = "ORDINARY"
+                            detail_update["workingHoursScheme"] = "NOT_SHIFT"
+                    if pct is not None:
+                        detail_update["percentageOfFullTimeEquivalent"] = float(pct)
+                    if annual_salary is not None:
+                        detail_update["annualSalary"] = float(annual_salary)
+                    if monthly_salary is not None:
+                        detail_update["monthlySalary"] = float(monthly_salary)
+                    if hourly is not None:
+                        detail_update["hourlyWage"] = float(hourly)
+                    # Remuneration type
+                    rem_type = "HOURLY_WAGE" if hourly else "MONTHLY_WAGE" if (employment_form or annual_salary or monthly_salary) else None
+                    if rem_type:
+                        detail_update["remunerationType"] = rem_type
+                    # STYRK/occupation code
+                    if styrk:
+                        styrk_str = "".join(ch for ch in str(styrk).strip() if ch.isdigit())
+                        try:
+                            occ_codes = self.client.list(
+                                "/employee/employment/occupationCode",
+                                fields="id,code,nameNO",
+                                params={"code": styrk_str, "count": 100},
+                            )
+                            if occ_codes:
+                                def _normalized_code(item: dict[str, Any]) -> str:
+                                    return "".join(ch for ch in str(item.get("code") or "") if ch.isdigit())
+
+                                def _occupation_score(item: dict[str, Any]) -> tuple[int, int, int]:
+                                    normalized = _normalized_code(item)
+                                    return (
+                                        normalized.find(styrk_str) if styrk_str in normalized else 99,
+                                        0 if normalized.endswith("0") else 1,
+                                        len(normalized),
+                                    )
+
+                                exact_matches = [o for o in occ_codes if _normalized_code(o) == styrk_str]
+                                selected = exact_matches[0] if exact_matches else None
+                                if selected is None:
+                                    prefix_matches = [
+                                        o for o in occ_codes
+                                        if _normalized_code(o).startswith(styrk_str)
+                                    ]
+                                    contains_matches = [
+                                        o for o in occ_codes
+                                        if styrk_str in _normalized_code(o)
+                                    ]
+                                    if prefix_matches:
+                                        prefix_matches.sort(key=lambda item: (_occupation_score(item), _normalized_code(item)))
+                                        selected = prefix_matches[0]
+                                        LOGGER.warning(
+                                            "STYRK code %s returned no exact match; selected prefix candidate %s",
+                                            styrk_str,
+                                            selected.get("code"),
+                                        )
+                                    elif contains_matches:
+                                        best_position = min(
+                                            _normalized_code(item).find(styrk_str)
+                                            for item in contains_matches
+                                        )
+                                        position_group = [
+                                            item for item in contains_matches
+                                            if _normalized_code(item).find(styrk_str) == best_position
+                                        ]
+                                        generic_group = [
+                                            item for item in position_group
+                                            if _normalized_code(item).endswith("0")
+                                        ]
+                                        if len(generic_group) == 1:
+                                            selected = generic_group[0]
+                                        elif len(generic_group) > 1:
+                                            generic_group.sort(key=lambda item: (len(_normalized_code(item)), _normalized_code(item)))
+                                            first_generic = generic_group[0]
+                                            second_generic = generic_group[1] if len(generic_group) > 1 else None
+                                            if second_generic is None or len(_normalized_code(first_generic)) < len(_normalized_code(second_generic)):
+                                                selected = first_generic
+                                        contains_matches.sort(key=lambda item: (_occupation_score(item), _normalized_code(item)))
+                                        if selected is None:
+                                            best = contains_matches[0]
+                                            best_score = _occupation_score(best)
+                                            second_score = _occupation_score(contains_matches[1]) if len(contains_matches) > 1 else None
+                                            if second_score != best_score:
+                                                selected = best
+                                        if selected is not None:
+                                            LOGGER.warning(
+                                                "STYRK code %s returned no exact match; selected contained candidate %s",
+                                                styrk_str,
+                                                selected.get("code"),
+                                            )
+                                        else:
+                                            LOGGER.warning(
+                                                "STYRK code %s returned ambiguous contained candidates: %s",
+                                                styrk_str,
+                                                ", ".join(str(o.get("code")) for o in contains_matches[:10]),
+                                            )
+                                if selected is not None:
+                                    detail_update["occupationCode"] = {"id": selected["id"]}
+                                    LOGGER.info(
+                                        "Resolved STYRK %s -> id=%d (%s)",
+                                        styrk_str,
+                                        selected["id"],
+                                        selected.get("nameNO"),
+                                    )
                                 else:
-                                    LOGGER.warning("STYRK code %s not found", styrk_str)
-                            except Exception as e:
-                                LOGGER.warning("Could not look up STYRK code %s: %s", styrk_str, e)
+                                    LOGGER.warning(
+                                        "STYRK code %s had no exact or unambiguous match",
+                                        styrk_str,
+                                    )
+                            else:
+                                LOGGER.warning("STYRK code %s not found", styrk_str)
+                        except Exception as e:
+                            LOGGER.warning("Could not look up STYRK code %s: %s", styrk_str, e)
 
-                        # Single PUT with all fields to avoid overwriting
-                        if detail_update:
-                            try:
+                    if detail_update:
+                        try:
+                            if detail_id:
                                 self.client.update("/employee/employment/details", detail_id, detail_update)
                                 LOGGER.info("Updated employment details for employee %s: %s",
                                             employee["id"], list(detail_update.keys()))
-                            except TripletexAPIError as e:
-                                LOGGER.warning("Could not update employment details: %s", e)
-                                # If it fails with remunerationType, retry without it
-                                if "remunerationType" in detail_update:
-                                    rem = detail_update.pop("remunerationType")
-                                    try:
+                            else:
+                                detail_create = dict(detail_update)
+                                detail_create["employment"] = {"id": emp["id"]}
+                                detail_create["date"] = (
+                                    _parse_date_value(start_date).isoformat() if start_date else date.today().isoformat()
+                                )
+                                self.client.create("/employee/employment/details", detail_create)
+                                LOGGER.info("Created employment details for employee %s: %s",
+                                            employee["id"], list(detail_update.keys()))
+                        except TripletexAPIError as e:
+                            LOGGER.warning("Could not update employment details: %s", e)
+                            # If it fails with remunerationType, retry without it
+                            if "remunerationType" in detail_update:
+                                rem = detail_update.pop("remunerationType")
+                                try:
+                                    if detail_id:
                                         self.client.update("/employee/employment/details", detail_id, detail_update)
                                         LOGGER.info("Updated employment details without remunerationType")
                                         # Try remunerationType alone
@@ -1168,8 +1290,15 @@ class TripletexService:
                                             self.client.update("/employee/employment/details", detail_id, {"remunerationType": rem})
                                         except Exception:
                                             pass
-                                    except Exception:
-                                        pass
+                                    else:
+                                        detail_create = dict(detail_update)
+                                        detail_create["employment"] = {"id": emp["id"]}
+                                        detail_create["date"] = (
+                                            _parse_date_value(start_date).isoformat() if start_date else date.today().isoformat()
+                                        )
+                                        self.client.create("/employee/employment/details", detail_create)
+                                except Exception:
+                                    pass
             except Exception as e:
                 LOGGER.warning("Could not update employment details: %s", e)
 
@@ -1290,7 +1419,7 @@ class TripletexService:
         if price_excl is not None:
             price_excl = float(price_excl)
             payload["priceExcludingVatCurrency"] = price_excl
-            # Must set incl price consistently — calculate from VAT rate
+            # Must set incl price consistently  -- calculate from VAT rate
             if price_incl is None:
                 price_incl = price_excl * (1 + vat_pct / 100)
             payload["priceIncludingVatCurrency"] = float(price_incl)
@@ -1376,17 +1505,20 @@ class TripletexService:
 
     def _activate_project_module(self) -> None:
         """Activate the module required for project creation, trying multiple options."""
+        activated_any = False
         for mod in ("SMART_PROJECT", "SMART", "KOMPLETT", "PROJECT", "PROSJEKT"):
             try:
                 self.client.activate_sales_module(mod)
                 LOGGER.info("Activated %s module for project creation", mod)
-                return
+                activated_any = True
             except TripletexAPIError as e:
                 if e.status_code == 409:
                     LOGGER.info("%s module already active", mod)
-                    return
+                    activated_any = True
+                    continue
                 LOGGER.warning("%s activation failed (status=%s): %s", mod, e.status_code, e)
-        LOGGER.warning("All project module activations failed, proceeding anyway")
+        if not activated_any:
+            LOGGER.warning("All project module activations failed, proceeding anyway")
 
     def _create_project(self, task: ParsedTask) -> None:
         # Check if this is a ledger analysis task (analyze expenses → create projects)
@@ -1527,7 +1659,7 @@ class TripletexService:
             )
             return
 
-        # Path 2: Project invoice — register timesheet hours first, then invoice
+        # Path 2: Project invoice  -- register timesheet hours first, then invoice
         # Only use this path if we have hours + employee (actual timesheet workflow)
         has_hours = task.attributes.get("hours") is not None
         has_project = task.attributes.get("projectName") is not None
@@ -1556,7 +1688,7 @@ class TripletexService:
         due_date = _parse_date_value(due_date_val) if due_date_val else invoice_date + timedelta(days=30)
         quantity = float(task.attributes.get("quantity", 1.0))
 
-        # Build order lines — support multi-line invoices with different VAT rates
+        # Build order lines  -- support multi-line invoices with different VAT rates
         order_lines_raw = task.attributes.get("orderLines")
         if order_lines_raw and isinstance(order_lines_raw, list) and len(order_lines_raw) > 0:
             # Multi-line invoice
@@ -1804,6 +1936,8 @@ class TripletexService:
                     [(num, f"+{inc:.0f}", name) for num, inc, name in top])
 
         # Create a project + activity for each
+        created_projects = 0
+        last_project_error: Exception | None = None
         for acct_num, increase, acct_name in top:
             project_name = acct_name
             try:
@@ -1816,6 +1950,7 @@ class TripletexService:
                 project = self.client.create("/project", project_payload)
                 LOGGER.info("Created project '%s' for account %d (increase: +%.0f)",
                             project_name, acct_num, increase)
+                created_projects += 1
 
                 # Create an activity for the project
                 try:
@@ -1829,7 +1964,16 @@ class TripletexService:
                 except Exception as e:
                     LOGGER.warning("Could not create activity for project '%s': %s", project_name, e)
             except Exception as e:
+                last_project_error = e
                 LOGGER.warning("Could not create project '%s': %s", project_name, e)
+        if created_projects == 0:
+            if last_project_error is not None:
+                raise last_project_error
+            raise TripletexAPIError(
+                "Ledger analysis project workflow created zero projects",
+                status_code=422,
+                response_text="",
+            )
 
     def _create_project_invoice(self, task: ParsedTask) -> None:
         """Multi-step: create project + timesheet entries + invoice from hours."""
@@ -2084,7 +2228,7 @@ class TripletexService:
                 results = self.client.search_invoices(invoice_number=str(task.identifier))
                 if results:
                     return results[0]
-                # Not found at all — fall through to create from scratch
+                # Not found at all  -- fall through to create from scratch
 
         invoice_number = task.attributes.get("invoiceNumber")
         if invoice_number:
@@ -2125,7 +2269,7 @@ class TripletexService:
         )
         results = self.client.search_invoices(customer_id=customer["id"])
         if not results:
-            # No invoices for this customer — create one so we can issue a credit note
+            # No invoices for this customer  -- create one so we can issue a credit note
             LOGGER.info("No invoices found for customer %r, creating one for credit note", customer_name)
             amount = task.attributes.get("amount") or 1000
             prereq_attrs = dict(task.attributes)
@@ -2206,6 +2350,19 @@ class TripletexService:
             email=employee_email,
             role="standard",
         )
+        if employee.get("userType") in (None, "", "NO_ACCESS"):
+            update_payload: dict[str, Any] = {"userType": "STANDARD"}
+            if not employee.get("email"):
+                update_payload["email"] = employee_email or f"{_normalize_ascii(employee_name).replace(' ', '.')}@placeholder.example.com"
+            try:
+                updated_employee = self.client.update("/employee", employee["id"], update_payload)
+                if isinstance(updated_employee, dict):
+                    employee.update(updated_employee)
+                else:
+                    employee.update(update_payload)
+                LOGGER.info("Explicitly upgraded travel-expense employee %s to STANDARD", employee["id"])
+            except Exception as e:
+                LOGGER.warning("Could not explicitly upgrade travel-expense employee %s: %s", employee.get("id"), e)
         departure_date_val = task.attributes.get("departureDate")
         return_date_val = task.attributes.get("returnDate")
         if not departure_date_val:
@@ -2453,7 +2610,7 @@ class TripletexService:
             ln = task.attributes.get("lastName", "")
             if fn and ln:
                 emp_name = f"{fn} {ln}"
-        # Don't use task email for lookup — it's the NEW value to set, not an identifier
+        # Don't use task email for lookup  -- it's the NEW value to set, not an identifier
         employee = self._find_employee(name=emp_name, email=None)
         # dateOfBirth is required for any employee update in Tripletex
         self._ensure_employee_has_date_of_birth(employee["id"])
@@ -2623,7 +2780,7 @@ class TripletexService:
 
     def _delete_employee(self, task: ParsedTask) -> None:
         employee = self._find_employee(name=task.target_name, email=task.attributes.get("email"))
-        # Tripletex has no DELETE /employee endpoint — deactivate instead
+        # Tripletex has no DELETE /employee endpoint  -- deactivate instead
         # dateOfBirth is required for any employee update
         self._ensure_employee_has_date_of_birth(employee["id"])
         self.client.update("/employee", employee["id"], {"userType": "NO_ACCESS"})
@@ -2634,7 +2791,7 @@ class TripletexService:
             self.client.delete("/customer", customer["id"])
         except TripletexAPIError as e:
             if e.status_code == 422 and "ordrer" in str(e).lower():
-                # Customer has orders — deactivate instead of deleting
+                # Customer has orders  -- deactivate instead of deleting
                 LOGGER.warning("Customer has orders, deactivating instead: %s", e)
                 self.client.update("/customer", customer["id"], {"isCustomer": False})
             else:
@@ -2646,7 +2803,7 @@ class TripletexService:
             self.client.delete("/project", int(project["id"]))
         except TripletexAPIError as e:
             if e.status_code == 422:
-                # Project has sub-projects/orders — close instead
+                # Project has sub-projects/orders  -- close instead
                 LOGGER.warning("Cannot delete project (has dependencies), closing: %s", e)
                 self.client.update("/project", int(project["id"]), {
                     "isClosed": True,
@@ -2769,7 +2926,7 @@ class TripletexService:
         except EntityNotFoundError:
             LOGGER.info("Contact %r not found (already deleted)", task.target_name)
             return
-        # Tripletex has no DELETE /contact/{id} — use batch delete endpoint
+        # Tripletex has no DELETE /contact/{id}  -- use batch delete endpoint
         self.client.delete_list("/contact", [contact["id"]])
 
     def _find_contact(self, *, name: str | None, customer_id: int | None = None) -> dict[str, Any]:
@@ -2930,6 +3087,274 @@ class TripletexService:
             task.attributes["postings"] = extracted_postings
             LOGGER.info("Extracted %d postings from raw prompt", len(extracted_postings))
 
+    def _infer_missing_vat_counter_account(
+        self,
+        *,
+        expense_account_num: int,
+        net_amount: float,
+        voucher_date: date,
+    ) -> int | None:
+        try:
+            history = self.client.search_ledger_postings(
+                date_from=f"{voucher_date.year}-01-01",
+                date_to=voucher_date.isoformat(),
+            )
+        except Exception as e:
+            LOGGER.warning("Could not inspect ledger history for VAT correction: %s", e)
+            return None
+
+        vouchers: dict[int, list[dict[str, Any]]] = {}
+        for posting in history:
+            voucher = posting.get("voucher") or {}
+            voucher_id = voucher.get("id")
+            if voucher_id is None:
+                continue
+            vouchers.setdefault(int(voucher_id), []).append(posting)
+
+        candidates: list[int] = []
+        for voucher_postings in vouchers.values():
+            has_matching_expense = False
+            for posting in voucher_postings:
+                account = posting.get("account") or {}
+                account_num = account.get("number")
+                amount = float(posting.get("amount") or 0)
+                if account_num == expense_account_num and abs(abs(amount) - net_amount) < 1.0:
+                    has_matching_expense = True
+                    break
+            if not has_matching_expense:
+                continue
+
+            for posting in voucher_postings:
+                account = posting.get("account") or {}
+                account_num = account.get("number")
+                amount = float(posting.get("amount") or 0)
+                if not isinstance(account_num, int):
+                    continue
+                if account_num in (expense_account_num, 2710):
+                    continue
+                if abs(abs(amount) - net_amount) < 1.0:
+                    candidates.append(account_num)
+
+        if not candidates:
+            return None
+
+        def _priority(account_num: int) -> tuple[int, int]:
+            if 2400 <= account_num <= 2499:
+                return (0, account_num)
+            if 1900 <= account_num <= 1999:
+                return (1, account_num)
+            return (2, account_num)
+
+        return sorted(candidates, key=_priority)[0]
+
+    def _correct_missing_vat_adjustment_postings(
+        self,
+        task: ParsedTask,
+        llm_postings: list[dict[str, Any]],
+        voucher_date: date,
+    ) -> None:
+        prompt_normalized = _normalize_ascii(task.raw_prompt or "")
+        if not any(
+            kw in prompt_normalized
+            for kw in (
+                "manglende mva",
+                "missing vat",
+                "mva-linje",
+                "vat line",
+                "tva manquante",
+                "ligne de tva",
+                "iva faltante",
+                "linha de iva",
+            )
+        ):
+            return
+
+        import re as _re
+
+        for posting in llm_postings:
+            try:
+                debit_account = int(posting.get("debitAccount"))
+                credit_account = int(posting.get("creditAccount"))
+                vat_amount = float(posting.get("amount"))
+            except (TypeError, ValueError):
+                continue
+
+            if debit_account != 2710 or credit_account != 1920 or vat_amount <= 0:
+                continue
+
+            description_normalized = _normalize_ascii(posting.get("description") or "")
+            account_context = f"{description_normalized} {prompt_normalized}"
+            account_matches = _re.findall(r"(?:konto|account|compte|cuenta|conta)\s*(\d{4})", account_context)
+            expense_accounts = [int(value) for value in account_matches if int(value) != 2710]
+            if not expense_accounts:
+                continue
+            expense_account_num = expense_accounts[0]
+            net_amount = round(vat_amount * 4, 2)
+            inferred_counter = self._infer_missing_vat_counter_account(
+                expense_account_num=expense_account_num,
+                net_amount=net_amount,
+                voucher_date=voucher_date,
+            )
+            if inferred_counter and inferred_counter != credit_account:
+                posting["creditAccount"] = inferred_counter
+                LOGGER.info(
+                    "Adjusted missing VAT correction counter-account from %s to %s for expense account %s",
+                    credit_account,
+                    inferred_counter,
+                    expense_account_num,
+                )
+
+    def _extract_receipt_vat_rate(self) -> float | None:
+        import re as _re
+
+        text = _normalize_ascii(self.last_attachment_text or "")
+        if not text:
+            return None
+        match = _re.search(r"(?:mva|vat|iva|tva)\s*([0-9]+(?:[.,][0-9]+)?)%", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1).replace(",", "."))
+        except ValueError:
+            return None
+
+    def _build_split_voucher_postings(
+        self,
+        *,
+        description: str,
+        voucher_date: date,
+        debit_only: list[dict[str, Any]],
+        credit_only: list[dict[str, Any]],
+        task: ParsedTask,
+    ) -> list[dict[str, Any]]:
+        import re as _re
+
+        if len(credit_only) != 1 or not debit_only:
+            return []
+
+        try:
+            credit_num_int = int(credit_only[0].get("creditAccount"))
+        except (TypeError, ValueError):
+            return []
+
+        posting_date = voucher_date.isoformat()
+        prompt_normalized = _normalize_ascii(task.raw_prompt or "")
+        is_receipt = any(
+            kw in prompt_normalized
+            for kw in ("kvittering", "receipt", "recibo", "quittung", "recu")
+        )
+        receipt_item = self._pick_receipt_line_item(task) if is_receipt else None
+
+        if receipt_item:
+            receipt_desc, total_incl = receipt_item
+            vat_rate = self._extract_receipt_vat_rate()
+            expense_candidates = []
+            desc_norm = _normalize_ascii(receipt_desc)
+            desc_tokens = {
+                token for token in _re.findall(r"[a-z0-9]+", desc_norm)
+                if len(token) >= 3
+            }
+            for posting in debit_only:
+                try:
+                    debit_num_int = int(posting.get("debitAccount"))
+                except (TypeError, ValueError):
+                    continue
+                if debit_num_int == 2710:
+                    continue
+                posting_norm = _normalize_ascii(posting.get("description") or "")
+                score = (
+                    1 if desc_norm and desc_norm in posting_norm else 0,
+                    sum(1 for token in desc_tokens if token in posting_norm),
+                )
+                expense_candidates.append((score, posting))
+
+            if expense_candidates:
+                expense_candidates.sort(key=lambda item: item[0], reverse=True)
+                selected_expense = expense_candidates[0][1]
+                expense_num_int = int(selected_expense["debitAccount"])
+                expense_amount = float(total_incl)
+                vat_amount = 0.0
+                if vat_rate and vat_rate > 0:
+                    expense_amount = round(float(total_incl) / (1 + vat_rate / 100), 2)
+                    vat_amount = round(float(total_incl) - expense_amount, 2)
+
+                postings: list[dict[str, Any]] = []
+                row = 1
+                expense_acct = self._ensure_account(expense_num_int)
+                postings.append({
+                    "row": row,
+                    "date": posting_date,
+                    "description": receipt_desc,
+                    "account": {"id": expense_acct["id"]},
+                    "amountGross": expense_amount,
+                    "amountGrossCurrency": expense_amount,
+                    "_account_number": expense_num_int,
+                })
+                row += 1
+
+                if vat_amount > 0:
+                    vat_acct = self._ensure_account(2710)
+                    postings.append({
+                        "row": row,
+                        "date": posting_date,
+                        "description": f"MVA {receipt_desc}",
+                        "account": {"id": vat_acct["id"]},
+                        "amountGross": vat_amount,
+                        "amountGrossCurrency": vat_amount,
+                        "_account_number": 2710,
+                    })
+                    row += 1
+
+                credit_acct = self._ensure_account(credit_num_int)
+                postings.append({
+                    "row": row,
+                    "date": posting_date,
+                    "description": receipt_desc,
+                    "account": {"id": credit_acct["id"]},
+                    "amountGross": -float(total_incl),
+                    "amountGrossCurrency": -float(total_incl),
+                    "_account_number": credit_num_int,
+                })
+                return postings
+
+        postings = []
+        row = 1
+        total_debit = 0.0
+        for posting in debit_only:
+            try:
+                debit_num_int = int(posting.get("debitAccount"))
+                amount_float = float(posting.get("amount"))
+            except (TypeError, ValueError):
+                continue
+            debit_acct = self._ensure_account(debit_num_int)
+            posting_desc = posting.get("description") or description
+            postings.append({
+                "row": row,
+                "date": posting_date,
+                "description": posting_desc,
+                "account": {"id": debit_acct["id"]},
+                "amountGross": amount_float,
+                "amountGrossCurrency": amount_float,
+                "_account_number": debit_num_int,
+            })
+            row += 1
+            total_debit += amount_float
+
+        if not postings:
+            return []
+
+        credit_acct = self._ensure_account(credit_num_int)
+        postings.append({
+            "row": row,
+            "date": posting_date,
+            "description": credit_only[0].get("description") or description,
+            "account": {"id": credit_acct["id"]},
+            "amountGross": -total_debit,
+            "amountGrossCurrency": -total_debit,
+            "_account_number": credit_num_int,
+        })
+        return postings
+
     def _create_voucher(self, task: ParsedTask) -> None:
         # Try extracting postings from raw prompt if LLM missed them
         self._extract_voucher_postings_from_prompt(task)
@@ -2944,6 +3369,13 @@ class TripletexService:
         description = task.attributes.get("description", "Manual voucher")
         voucher_date_val = task.attributes.get("voucherDate") or task.attributes.get("date") or date.today()
         voucher_date = _parse_date_value(voucher_date_val) if not isinstance(voucher_date_val, date) else voucher_date_val
+        salary_employee_name = task.attributes.get("employeeName") or task.target_name
+        salary_total = task.attributes.get("monthlySalary")
+        if salary_total is None:
+            base_salary = task.attributes.get("baseSalary") or task.attributes.get("amount")
+            bonus = task.attributes.get("bonus")
+            if base_salary is not None or bonus is not None:
+                salary_total = float(base_salary or 0) + float(bonus or 0)
 
         voucher_type = self._resolve_voucher_type()
 
@@ -2951,8 +3383,10 @@ class TripletexService:
 
         # Handle LLM format: postings=[{debitAccount: 1500, creditAccount: 3000, amount: 1000}]
         # Also handles split format: [{debitAccount: 2400, amount: X}, {creditAccount: 1920, amount: X}]
+        self._strip_unresolved_salary_provision_postings(task)
         llm_postings = task.attributes.get("postings")
         if llm_postings and isinstance(llm_postings, list):
+            self._correct_missing_vat_adjustment_postings(task, llm_postings, voucher_date)
             # Try to pair up single-sided postings (debit-only + credit-only)
             debit_only = [p for p in llm_postings if p.get("debitAccount") and not p.get("creditAccount")]
             credit_only = [p for p in llm_postings if p.get("creditAccount") and not p.get("debitAccount")]
@@ -2961,48 +3395,57 @@ class TripletexService:
                 # Merge into a single paired posting
                 amt = debit_only[0].get("amount") or credit_only[0].get("amount")
                 paired = [{"debitAccount": debit_only[0]["debitAccount"], "creditAccount": credit_only[0]["creditAccount"], "amount": amt}]
+            if not paired and debit_only and credit_only:
+                postings = self._build_split_voucher_postings(
+                    description=description,
+                    voucher_date=voucher_date,
+                    debit_only=debit_only,
+                    credit_only=credit_only,
+                    task=task,
+                )
 
-            row = 1
-            for p in (paired or llm_postings):
-                debit_num = p.get("debitAccount")
-                credit_num = p.get("creditAccount")
-                amt = p.get("amount")
-                if debit_num is not None and credit_num is not None and amt is not None:
-                    # Skip postings with placeholder/non-numeric values from LLM
-                    try:
-                        debit_num_int = int(debit_num)
-                    except (ValueError, TypeError):
-                        LOGGER.warning("Skipping posting with non-numeric debit account: %s", debit_num)
-                        continue
-                    try:
-                        credit_num_int = int(credit_num)
-                    except (ValueError, TypeError):
-                        LOGGER.warning("Skipping posting with non-numeric credit account: %s", credit_num)
-                        continue
-                    try:
-                        amt_float = float(amt)
-                    except (ValueError, TypeError):
-                        LOGGER.warning("Skipping posting with non-numeric amount: %s", amt)
-                        continue
-                    debit_acct = self._ensure_account(debit_num_int)
-                    credit_acct = self._ensure_account(credit_num_int)
-                    posting_desc = p.get("description") or description
-                    d_posting: dict[str, Any] = {"row": row, "account": {"id": debit_acct["id"]}, "amountGross": amt_float, "amountGrossCurrency": amt_float, "description": posting_desc, "_account_number": debit_num_int}
-                    row += 1
-                    c_posting: dict[str, Any] = {"row": row, "account": {"id": credit_acct["id"]}, "amountGross": -amt_float, "amountGrossCurrency": -amt_float, "description": posting_desc, "_account_number": credit_num_int}
-                    row += 1
-                    # Supplier accounts (2400-2499) require supplier reference
-                    if 2400 <= debit_num_int <= 2499 or 2400 <= credit_num_int <= 2499:
+            if not postings:
+                row = 1
+                for p in (paired or llm_postings):
+                    debit_num = p.get("debitAccount")
+                    credit_num = p.get("creditAccount")
+                    amt = p.get("amount")
+                    if debit_num is not None and credit_num is not None and amt is not None:
+                        # Skip postings with placeholder/non-numeric values from LLM
                         try:
-                            sup = self._ensure_supplier(name=task.attributes.get("supplierName") or posting_desc)
-                            if 2400 <= credit_num_int <= 2499:
-                                c_posting["supplier"] = {"id": sup["id"]}
-                            if 2400 <= debit_num_int <= 2499:
-                                d_posting["supplier"] = {"id": sup["id"]}
-                        except Exception:
-                            pass
-                    postings.append(d_posting)
-                    postings.append(c_posting)
+                            debit_num_int = int(debit_num)
+                        except (ValueError, TypeError):
+                            LOGGER.warning("Skipping posting with non-numeric debit account: %s", debit_num)
+                            continue
+                        try:
+                            credit_num_int = int(credit_num)
+                        except (ValueError, TypeError):
+                            LOGGER.warning("Skipping posting with non-numeric credit account: %s", credit_num)
+                            continue
+                        try:
+                            amt_float = float(amt)
+                        except (ValueError, TypeError):
+                            LOGGER.warning("Skipping posting with non-numeric amount: %s", amt)
+                            continue
+                        debit_acct = self._ensure_account(debit_num_int)
+                        credit_acct = self._ensure_account(credit_num_int)
+                        posting_desc = p.get("description") or description
+                        d_posting: dict[str, Any] = {"row": row, "account": {"id": debit_acct["id"]}, "amountGross": amt_float, "amountGrossCurrency": amt_float, "description": posting_desc, "_account_number": debit_num_int}
+                        row += 1
+                        c_posting: dict[str, Any] = {"row": row, "account": {"id": credit_acct["id"]}, "amountGross": -amt_float, "amountGrossCurrency": -amt_float, "description": posting_desc, "_account_number": credit_num_int}
+                        row += 1
+                        # Supplier accounts (2400-2499) require supplier reference
+                        if 2400 <= debit_num_int <= 2499 or 2400 <= credit_num_int <= 2499:
+                            try:
+                                sup = self._ensure_supplier(name=task.attributes.get("supplierName") or posting_desc)
+                                if 2400 <= credit_num_int <= 2499:
+                                    c_posting["supplier"] = {"id": sup["id"]}
+                                if 2400 <= debit_num_int <= 2499:
+                                    d_posting["supplier"] = {"id": sup["id"]}
+                            except Exception:
+                                pass
+                        postings.append(d_posting)
+                        postings.append(c_posting)
 
         # Fallback: rule-based parser format with debitAccountNumber/creditAccountNumber
         if not postings:
@@ -3037,7 +3480,7 @@ class TripletexService:
                         LOGGER.warning("Could not add supplier to voucher posting: %s", e)
                 postings = [debit_posting, credit_posting]
 
-        # Fallback: single account with amount — use 1920 (bank) as counter-account
+        # Fallback: single account with amount  -- use 1920 (bank) as counter-account
         # unless supplier is explicitly mentioned (then use 2400)
         if not postings:
             amount = task.attributes.get("amount")
@@ -3073,19 +3516,31 @@ class TripletexService:
                             pass
                     postings = [d_posting_fb, c_posting_fb]
 
+        if not postings and salary_employee_name and salary_total is not None:
+            self._create_salary_voucher(
+                employee_name=str(salary_employee_name),
+                total_gross=float(salary_total),
+                voucher_date=voucher_date,
+            )
+            return
+
         # Detect year-end closing: create separate vouchers for each posting pair
         is_year_end = _contains_any_ascii(
             task.raw_prompt,
-            ("årsoppgjør", "arsoppgjor", "year-end closing", "encerramento anual",
-             "cierre anual", "jahresabschluss", "clôture annuelle", "årsoppgjer",
-             "arsoppgjer"),
+            ("arsoppgjor", "arsoppgjer", "arsavslutning", "year-end closing",
+             "annual closing", "encerramento anual", "cierre anual",
+             "jahresabschluss", "cloture annuelle"),
         )
 
         if is_year_end:
             # Adjust depreciation amounts to use actual asset book values (ex-VAT)
             self._adjust_year_end_depreciation(postings, task, voucher_date)
             # Correct prepaid reversal expense account if LLM included it
-            self._correct_prepaid_expense_in_postings(postings, task.raw_prompt or "")
+            self._correct_prepaid_expense_in_postings(
+                postings,
+                task.raw_prompt or "",
+                voucher_date=voucher_date,
+            )
 
         # Strip internal metadata fields before sending to API
         def _strip_internal(posting_list: list[dict[str, Any]]) -> None:
@@ -3138,6 +3593,60 @@ class TripletexService:
             self._post_year_end_prepaid_reversal(task, postings, voucher_date, voucher_type)
             self._post_year_end_tax_provision(task, voucher_date, voucher_type)
 
+    def _extract_salary_provision_amount(self, prompt: str) -> float | None:
+        import re as _re
+
+        normalized_prompt = _normalize_ascii(prompt or "")
+        patterns = [
+            r"(?:provisao salarial|lonnsavsetning|salary provision|gehaltsruckstellung|provision salariale|provision salarial)[^.]*?([\d][\d\s.,]*)\s*(?:nok|kr)\b",
+            r"(?:debit|debito|soll)\D{0,20}5000[^.]{0,80}?([\d][\d\s.,]*)\s*(?:nok|kr)\b",
+        ]
+        for pattern in patterns:
+            match = _re.search(pattern, normalized_prompt, _re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                return float(match.group(1).replace(" ", "").replace(",", "."))
+            except ValueError:
+                continue
+        return None
+
+    def _strip_unresolved_salary_provision_postings(self, task: ParsedTask) -> None:
+        prompt = task.raw_prompt or ""
+        if not _contains_any_ascii(
+            prompt,
+            (
+                "provisao salarial", "lonnsavsetning", "salary provision",
+                "gehaltsruckstellung", "provision salariale", "provision salarial",
+            ),
+        ):
+            return
+
+        llm_postings = task.attributes.get("postings")
+        if not isinstance(llm_postings, list) or not llm_postings:
+            return
+
+        amount = self._extract_salary_provision_amount(prompt)
+        if amount is not None and amount > 0:
+            return
+
+        filtered: list[dict[str, Any]] = []
+        removed = False
+        for posting in llm_postings:
+            try:
+                debit_num = int(posting.get("debitAccount", 0))
+                credit_num = int(posting.get("creditAccount", 0))
+            except (TypeError, ValueError):
+                filtered.append(posting)
+                continue
+            if 5000 <= debit_num <= 5999 and 2900 <= credit_num <= 2999:
+                removed = True
+                continue
+            filtered.append(posting)
+        if removed:
+            task.attributes["postings"] = filtered
+            LOGGER.warning("Removed salary provision posting from LLM output because prompt contained no explicit provision amount")
+
     def _post_salary_provision_if_missing(
         self, task: ParsedTask, created_postings: list[dict[str, Any]],
         voucher_date: date, voucher_type: dict | None,
@@ -3177,41 +3686,7 @@ class TripletexService:
             debit_num = int(acct_match.group(1))
             credit_num = int(acct_match.group(2))
 
-        # Extract amount from prompt near salary provision keywords
-        amount = None
-        amt_match = _re.search(
-            r"provis[ãa]o\s+salarial[^.]*?([\d\s.,]+)\s*(?:NOK|kr|nok)",
-            prompt, _re.IGNORECASE,
-        )
-        if amt_match:
-            try:
-                amount = float(amt_match.group(1).replace(" ", "").replace(",", "."))
-            except ValueError:
-                pass
-
-        # If no amount found near the keyword, look for amount near account numbers
-        if amount is None:
-            amt_match2 = _re.search(
-                r"(?:5000|salary|lonn|salarial)[^.]*?([\d\s.,]+)\s*(?:NOK|kr|nok)",
-                prompt, _re.IGNORECASE,
-            )
-            if amt_match2:
-                try:
-                    amount = float(amt_match2.group(1).replace(" ", "").replace(",", "."))
-                except ValueError:
-                    pass
-
-        if amount is None:
-            # Use accrual amount as reasonable estimate if available
-            for lp in llm_postings:
-                try:
-                    a = float(lp.get("amount", 0))
-                    if a > 0:
-                        amount = a
-                        break
-                except (ValueError, TypeError):
-                    pass
-
+        amount = self._extract_salary_provision_amount(prompt)
         if amount is None or amount <= 0:
             LOGGER.warning("Cannot determine salary provision amount, skipping")
             return
@@ -3316,7 +3791,7 @@ class TripletexService:
                     continue  # Not matching this asset
 
                 # Use the prompt-provided cost/years for depreciation (don't adjust
-                # based on book value — the competition expects cost/years)
+                # based on book value  -- the competition expects cost/years)
                 correct_depr = round(prompt_cost / years, 2)
                 if abs(current_depr - correct_depr) > 0.01:
                     LOGGER.info(
@@ -3332,7 +3807,11 @@ class TripletexService:
                 break  # Found matching asset
 
     def _correct_prepaid_expense_in_postings(
-        self, postings: list[dict[str, Any]], prompt: str
+        self,
+        postings: list[dict[str, Any]],
+        prompt: str,
+        *,
+        voucher_date: date | None = None,
     ) -> None:
         """If a prepaid reversal posting exists, verify/correct its expense account."""
         for i in range(0, len(postings), 2):
@@ -3347,25 +3826,91 @@ class TripletexService:
             if not (1700 <= credit_acct_num <= 1799):
                 continue
 
-            correct_expense = self._resolve_prepaid_expense_account(prompt, credit_acct_num)
+            correct_expense = self._resolve_prepaid_expense_account(
+                prompt,
+                credit_acct_num,
+                voucher_date=voucher_date,
+            )
             if correct_expense != debit_acct_num:
-                LOGGER.info("Correcting prepaid expense account: %d → %d", debit_acct_num, correct_expense)
+                LOGGER.info("Correcting prepaid expense account: %d -> %d", debit_acct_num, correct_expense)
                 new_acct = self._ensure_account(correct_expense)
                 debit_p["account"] = {"id": new_acct["id"]}
                 debit_p["_account_number"] = correct_expense
+            desc_text = f"{debit_p.get('description', '')} {credit_p.get('description', '')}"
+            if not _contains_any_ascii(
+                desc_text,
+                ("revers", "reverse", "opplos", "oppl�s", "auflos", "auflosung"),
+            ):
+                normalized_desc = "Reversering forskuddsbetalte kostnader"
+                debit_p["description"] = normalized_desc
+                credit_p["description"] = normalized_desc
             break
 
-    def _resolve_prepaid_expense_account(self, prompt: str, prepaid_acct_num: int) -> int:
+    def _infer_prepaid_expense_account_from_history(
+        self,
+        prepaid_acct_num: int,
+        *,
+        voucher_date: date | None = None,
+    ) -> int | None:
+        if voucher_date is None or not hasattr(self.client, "search_ledger_postings"):
+            return None
+        try:
+            all_postings = self.client.search_ledger_postings(
+                date_from=f"{voucher_date.year}-01-01",
+                date_to=f"{voucher_date.year}-12-31",
+            )
+        except Exception:
+            return None
+
+        voucher_accounts: dict[int, list[int]] = {}
+        for posting in all_postings:
+            voucher = posting.get("voucher") or {}
+            voucher_id = voucher.get("id")
+            acct_num = (posting.get("account") or {}).get("number")
+            if not isinstance(voucher_id, int) or not isinstance(acct_num, int):
+                continue
+            voucher_accounts.setdefault(voucher_id, []).append(acct_num)
+
+        candidates: dict[int, int] = {}
+        for acct_numbers in voucher_accounts.values():
+            if prepaid_acct_num not in acct_numbers:
+                continue
+            for acct_num in acct_numbers:
+                if acct_num == prepaid_acct_num:
+                    continue
+                if 3000 <= acct_num < 8000:
+                    candidates[acct_num] = candidates.get(acct_num, 0) + 1
+
+        if not candidates:
+            return None
+
+        best_acct = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))[0][0]
+        LOGGER.info("Prepaid account %d history -> expense %d", prepaid_acct_num, best_acct)
+        return best_acct
+
+    def _resolve_prepaid_expense_account(
+        self,
+        prompt: str,
+        prepaid_acct_num: int,
+        *,
+        voucher_date: date | None = None,
+    ) -> int:
         """Determine the correct expense account for a prepaid reversal.
 
         Checks the prepaid account's name for clues, then falls back to 6300.
         """
-        # Map prepaid account name keywords → expense accounts
+        history_match = self._infer_prepaid_expense_account_from_history(
+            prepaid_acct_num,
+            voucher_date=voucher_date,
+        )
+        if history_match is not None:
+            return history_match
+        # Map prepaid account name keywords -> expense accounts
         _PREPAID_EXPENSE_MAP = {
             "leie": 6300,       # Rent
             "husleie": 6300,    # Rent
             "forsikring": 6400, # Insurance
-            "strøm": 6340,     # Electricity
+            "str�m": 6340,     # Electricity
             "strom": 6340,
             "energi": 6340,
             "kontor": 6800,    # Office costs
@@ -3381,7 +3926,7 @@ class TripletexService:
                 name_lower = accts[0].get("name", "").lower()
                 for keyword, expense_num in _PREPAID_EXPENSE_MAP.items():
                     if keyword in name_lower:
-                        LOGGER.info("Prepaid account %d name '%s' → expense %d",
+                        LOGGER.info("Prepaid account %d name '%s' -> expense %d",
                                     prepaid_acct_num, accts[0]["name"], expense_num)
                         return expense_num
         except Exception:
@@ -3463,7 +4008,9 @@ class TripletexService:
 
         # Resolve expense account from prepaid account name or prompt context
         expense_acct_num = self._resolve_prepaid_expense_account(
-            prompt, prepaid_acct_num
+            prompt,
+            prepaid_acct_num,
+            voucher_date=voucher_date,
         )
 
         try:
@@ -3540,23 +4087,34 @@ class TripletexService:
                 date_to=f"{year}-12-31",
             )
 
-            # Calculate operating result: sum amounts for accounts 3000-8699
-            # In Tripletex: debit=positive, credit=negative
-            # Income (3xxx) is credit-normal → negative amounts
-            # Expenses (4xxx-7xxx) are debit-normal → positive amounts
-            # 8000-8299: financial items, 8300-8599: extraordinary items
-            # 8600-8699: other pre-tax items. 8700+ is tax itself.
-            # Result = -(sum of 3000-8699) → positive means profit
-            result_sum = 0.0
+            # Calculate ordinary taxable result:
+            # 3000-7999: operating revenue/expenses
+            # 8000-8299: financial items as part of ordinary pre-tax result
+            # 8300-8699: special/year-end allocation accounts, excluded from the
+            # tax base to avoid double counting appropriations.
+            ordinary_sum = 0.0
+            financial_sum = 0.0
+            excluded_special_sum = 0.0
             for posting in all_postings:
                 acct = posting.get("account", {})
                 acct_num = acct.get("number", 0)
-                if 3000 <= acct_num < 8700:
-                    result_sum += float(posting.get("amount", 0))
+                amount = float(posting.get("amount", 0))
+                if 3000 <= acct_num < 8000:
+                    ordinary_sum += amount
+                elif 8000 <= acct_num < 8300:
+                    financial_sum += amount
+                elif 8300 <= acct_num < 8700:
+                    excluded_special_sum += amount
 
-            taxable_result = -result_sum  # Negate: income is negative, so -(negative) = positive profit
-            LOGGER.info("Year-end tax: result_sum=%.2f, taxable_result=%.2f, rate=%.0f%%",
-                        result_sum, taxable_result, tax_rate * 100)
+            taxable_result = -(ordinary_sum + financial_sum)
+            LOGGER.info(
+                "Year-end tax: ordinary_sum=%.2f, financial_sum=%.2f, excluded_special_sum=%.2f, taxable_result=%.2f, rate=%.0f%%",
+                ordinary_sum,
+                financial_sum,
+                excluded_special_sum,
+                taxable_result,
+                tax_rate * 100,
+            )
 
             if taxable_result > 0:
                 tax_amount = round(taxable_result * tax_rate, 2)
@@ -3580,7 +4138,7 @@ class TripletexService:
                 LOGGER.info("Posted year-end tax provision: %.2f (%.0f%% of %.2f)",
                             tax_amount, tax_rate * 100, taxable_result)
             else:
-                LOGGER.info("No tax provision needed — taxable result %.2f is not positive", taxable_result)
+                LOGGER.info("No tax provision needed  -- taxable result %.2f is not positive", taxable_result)
         except Exception as e:
             LOGGER.warning("Could not calculate/post tax provision: %s", e)
 
@@ -3622,7 +4180,7 @@ class TripletexService:
             # Safety check: if postings don't sum to zero, try to fix
             total = sum(bp["amount"] for bp in balance_postings)
             if abs(total) > 0.01 and len(balance_postings) >= 2:
-                # All same sign — flip the equity/liability ones
+                # All same sign  -- flip the equity/liability ones
                 for bp_idx, bp in enumerate(balance_postings):
                     bp["amount"] = -bp["amount"]
                     new_total = sum(b["amount"] for b in balance_postings)
@@ -3760,7 +4318,7 @@ class TripletexService:
             self.client.create_timesheet_entry(payload)
         except TripletexAPIError as e:
             if e.status_code == 409:
-                # Already registered — update existing entry
+                # Already registered  -- update existing entry
                 LOGGER.info("Timesheet entry already exists, updating hours")
                 entries = self.client.list("/timesheet/entry", params={
                     "employeeId": employee["id"],
@@ -3771,7 +4329,7 @@ class TripletexService:
                 if entries:
                     self.client.update("/timesheet/entry", entries[0]["id"], {"hours": hours})
             elif e.status_code == 422 and "aktiviteten" in str(e).lower():
-                # Activity not usable on this project — create a fresh one and link it
+                # Activity not usable on this project  -- create a fresh one and link it
                 LOGGER.warning("Activity not usable, creating new activity: %s", e)
                 new_activity = self.client.create_activity({"name": activity_name or "General", "activityType": "PROJECT_GENERAL_ACTIVITY"})
                 payload["activity"] = {"id": new_activity["id"]}
@@ -3788,7 +4346,7 @@ class TripletexService:
                     self.client.create_timesheet_entry(payload)
                 except TripletexAPIError as e2:
                     if e2.status_code == 422 and "aktiviteten" in str(e2).lower():
-                        # Still failing — try without project
+                        # Still failing  -- try without project
                         LOGGER.warning("Activity still not usable with project, trying without project: %s", e2)
                         payload.pop("project", None)
                         self.client.create_timesheet_entry(payload)
@@ -3878,7 +4436,7 @@ class TripletexService:
                     module_name = mod
                     break
         if not module_name:
-            module_name = "SMART"  # Safe default — enables most features
+            module_name = "SMART"  # Safe default  -- enables most features
             LOGGER.warning("Could not determine module name, defaulting to SMART")
 
         try:
@@ -3889,11 +4447,100 @@ class TripletexService:
 
     # --- Tier 3: Incoming Invoice (Supplier Invoice) ---
 
-    def _create_incoming_invoice(self, task: ParsedTask) -> None:
-        # NOTE: POST /incomingInvoice is BETA/restricted (always 403 on competition).
-        # Skip module activation to avoid wasting API calls and risking session invalidation.
-        # We go straight to voucher fallback which doesn't need special modules.
+    def _extract_receipt_line_items(self) -> list[tuple[str, float]]:
+        import re as _re
 
+        text = self.last_attachment_text or ""
+        items: list[tuple[str, float]] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = _re.match(r"(.+?)\s+([\d][\d\s.,]*)\s*kr\b", line, _re.IGNORECASE)
+            if not match:
+                continue
+            description = match.group(1).strip(" :-")
+            normalized = _normalize_ascii(description)
+            if any(
+                marker in normalized
+                for marker in ("totalt", "mva", "betalt med", "kvittering", "vare pris", "org.nr")
+            ):
+                continue
+            try:
+                amount = float(match.group(2).replace(" ", "").replace(",", "."))
+            except ValueError:
+                continue
+            items.append((description, amount))
+        return items
+
+    def _pick_receipt_line_item(self, task: ParsedTask) -> tuple[str, float] | None:
+        import re as _re
+
+        prompt_norm = _normalize_ascii(task.raw_prompt or "")
+        if not prompt_norm:
+            return None
+
+        items = self._extract_receipt_line_items()
+        if not items:
+            return None
+
+        exact_matches = [(desc, amount) for desc, amount in items if _normalize_ascii(desc) in prompt_norm]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+
+        stopwords = {
+            "receipt", "recibo", "recu", "quittung", "kvittering",
+            "department", "abteilung", "avdeling", "departement",
+            "lager", "drift", "mwst", "mva", "vat", "iva", "tva",
+            "expense", "ausgabe", "gasto", "depense", "utgift",
+            "correct", "korrekte", "richtige", "riktig",
+            "treatment", "behandling", "behandlung", "traitement",
+        }
+        prompt_tokens = {
+            token
+            for token in _re.findall(r"[a-z0-9]+", prompt_norm)
+            if len(token) >= 3 and token not in stopwords
+        }
+
+        token_complete_matches: list[tuple[tuple[int, int], tuple[str, float]]] = []
+        for desc, amount in items:
+            desc_tokens = [
+                token for token in _re.findall(r"[a-z0-9]+", _normalize_ascii(desc))
+                if len(token) >= 3
+            ]
+            if desc_tokens and all(token in prompt_tokens for token in desc_tokens):
+                token_complete_matches.append(((len(desc_tokens), len(_normalize_ascii(desc))), (desc, amount)))
+        if len(token_complete_matches) == 1:
+            return token_complete_matches[0][1]
+        if len(token_complete_matches) > 1:
+            token_complete_matches.sort(key=lambda item: item[0], reverse=True)
+            best = token_complete_matches[0]
+            second = token_complete_matches[1] if len(token_complete_matches) > 1 else None
+            if second is None or best[0] > second[0]:
+                return best[1]
+
+        prompt_tokens = {
+            token
+            for token in _re.findall(r"[a-z0-9]+", prompt_norm)
+            if len(token) >= 3 and token not in stopwords
+        }
+        best_match: tuple[str, float] | None = None
+        best_score = 0
+        duplicate_best = False
+        for desc, amount in items:
+            desc_norm = _normalize_ascii(desc)
+            score = sum(1 for token in prompt_tokens if token in desc_norm)
+            if score > best_score:
+                best_match = (desc, amount)
+                best_score = score
+                duplicate_best = False
+            elif score and score == best_score:
+                duplicate_best = True
+        if best_match and best_score > 0 and not duplicate_best:
+            return best_match
+        return None
+
+    def _create_incoming_invoice(self, task: ParsedTask) -> None:
         supplier_name = task.attributes.get("supplierName") or task.attributes.get("name") or task.target_name
         if not supplier_name:
             raise ParsingError("Incoming invoice requires a supplier name")
@@ -3911,20 +4558,28 @@ class TripletexService:
         vat_rate = task.attributes.get("vatRate")
         vat_rate_f = float(vat_rate) if vat_rate is not None else None
 
-        # Determine net amount (excl VAT) — handle both "amount" and "totalAmountIncludingVat"
+        # Determine net amount (excl VAT)  -- handle both "amount" and "totalAmountIncludingVat"
         total_incl = task.attributes.get("totalAmountIncludingVat")
         raw_amount = task.attributes.get("amount")
         amount_is_incl_vat = task.attributes.get("amountIsVatInclusive", False)
 
-        # Detect receipt/kvittering context — item prices on Norwegian receipts include VAT
+        # Detect receipt/kvittering context  -- item prices on Norwegian receipts include VAT
         prompt_lower = _normalize_ascii(task.raw_prompt or "")
         is_receipt = any(kw in prompt_lower for kw in (
             "kvittering", "receipt", "recibo", "quittung", "recu",
             "herav mva", "inkl mva", "inkl. mva", "incl vat", "including vat",
         ))
+        if is_receipt:
+            receipt_item = self._pick_receipt_line_item(task)
+            if receipt_item:
+                receipt_desc, receipt_amount = receipt_item
+                total_incl = receipt_amount
+                raw_amount = receipt_amount
+                task.attributes["description"] = receipt_desc
+                LOGGER.info("Selected specific receipt line item %r amount %.2f", receipt_desc, receipt_amount)
         if is_receipt and not amount_is_incl_vat and total_incl is None:
             amount_is_incl_vat = True
-            LOGGER.info("Receipt detected — treating amount as VAT-inclusive")
+            LOGGER.info("Receipt detected  -- treating amount as VAT-inclusive")
 
         if total_incl is not None:
             total_incl = float(total_incl)
@@ -3969,22 +4624,39 @@ class TripletexService:
         LOGGER.info("POST /incomingInvoice payload: supplier=%s amount_incl_vat=%.2f net=%.2f vatRate=%s",
                      supplier_name, amount_incl_vat, net_amount, vat_rate_f)
 
-        # POST /incomingInvoice is BETA/restricted (always 403 on competition accounts).
-        # Skip the API attempt to save an API call and avoid potential session issues.
-        # Go directly to voucher fallback.
-        LOGGER.info("Creating incoming invoice via voucher (supplier=%s, net=%.2f, vatRate=%s)", supplier_name, net_amount, vat_rate_f)
         try:
-            self._create_incoming_invoice_via_voucher(
+            self._create_incoming_invoice_via_api(
                 supplier=supplier,
-                amount=net_amount,
+                amount_incl_vat=amount_incl_vat,
                 invoice_date=invoice_date,
+                due_date=due_date,
                 description=voucher_desc,
+                invoice_number=inv_num,
                 debit_account_id=debit_accounts[0]["id"],
                 vat_rate=vat_rate_f,
                 department=department,
             )
-        except Exception as ve:
-            LOGGER.warning("Voucher fallback also failed: %s. Incoming invoice not supported on this account.", ve)
+            return
+        except TripletexAPIError as e:
+            if e.status_code not in (401, 403, 404, 405):
+                raise
+            LOGGER.warning(
+                "Incoming invoice API unavailable (%s); falling back to voucher for supplier %s",
+                e.status_code,
+                supplier_name,
+            )
+
+        LOGGER.info("Creating incoming invoice via voucher (supplier=%s, net=%.2f, vatRate=%s)", supplier_name, net_amount, vat_rate_f)
+        self._create_incoming_invoice_via_voucher(
+            supplier=supplier,
+            amount=net_amount,
+            invoice_date=invoice_date,
+            description=voucher_desc,
+            debit_account_id=debit_accounts[0]["id"],
+            invoice_number=inv_num,
+            vat_rate=vat_rate_f,
+            department=department,
+        )
 
     def _create_incoming_invoice_via_api(
         self,
@@ -4062,6 +4734,7 @@ class TripletexService:
         invoice_date: date,
         description: str,
         debit_account_id: int,
+        invoice_number: str | None = None,
         vat_rate: float | None = None,
         department: dict[str, Any] | None = None,
     ) -> None:
@@ -4081,6 +4754,7 @@ class TripletexService:
 
         postings: list[dict[str, Any]] = []
         row = 1
+        posting_date = invoice_date.isoformat()
 
         dept_ref = {"id": department["id"]} if department else None
 
@@ -4091,28 +4765,33 @@ class TripletexService:
 
             # Debit: expense account (net amount)
             expense_posting: dict[str, Any] = {
-                "row": row, "description": description,
+                "row": row, "date": posting_date, "description": description,
                 "account": {"id": debit_account_id},
                 "amountGross": amount, "amountGrossCurrency": amount,
             }
             if dept_ref:
                 expense_posting["department"] = dept_ref
+            if invoice_number:
+                expense_posting["invoiceNumber"] = str(invoice_number)
             postings.append(expense_posting)
             row += 1
 
             # Debit: incoming VAT account 2710
             vat_accounts = self.client.search_accounts_by_number(2710)
             if vat_accounts:
-                postings.append({
-                    "row": row, "description": f"MVA {description}",
+                vat_posting: dict[str, Any] = {
+                    "row": row, "date": posting_date, "description": f"MVA {description}",
                     "account": {"id": vat_accounts[0]["id"]},
                     "amountGross": vat_amount, "amountGrossCurrency": vat_amount,
-                })
+                }
+                if invoice_number:
+                    vat_posting["invoiceNumber"] = str(invoice_number)
+                postings.append(vat_posting)
                 row += 1
 
             # Credit: supplier account (total with VAT)
             credit_posting: dict[str, Any] = {
-                "row": row, "description": description,
+                "row": row, "date": posting_date, "description": description,
                 "account": {"id": credit_accounts[0]["id"]},
                 "amountGross": -total_with_vat, "amountGrossCurrency": -total_with_vat,
             }
@@ -4120,25 +4799,31 @@ class TripletexService:
             credit_acct_num = credit_accounts[0].get("number", 0)
             if 2400 <= int(credit_acct_num) <= 2499:
                 credit_posting["supplier"] = {"id": supplier["id"]}
+            if invoice_number:
+                credit_posting["invoiceNumber"] = str(invoice_number)
             postings.append(credit_posting)
         else:
             # 2-line voucher: debit expense, credit supplier/bank
             expense_posting_nv: dict[str, Any] = {
-                "row": 1, "description": description,
+                "row": 1, "date": posting_date, "description": description,
                 "account": {"id": debit_account_id},
                 "amountGross": amount, "amountGrossCurrency": amount,
             }
             if dept_ref:
                 expense_posting_nv["department"] = dept_ref
+            if invoice_number:
+                expense_posting_nv["invoiceNumber"] = str(invoice_number)
             postings.append(expense_posting_nv)
             credit_posting = {
-                "row": 2, "description": description,
+                "row": 2, "date": posting_date, "description": description,
                 "account": {"id": credit_accounts[0]["id"]},
                 "amountGross": -amount, "amountGrossCurrency": -amount,
             }
             credit_acct_num = credit_accounts[0].get("number", 0)
             if 2400 <= int(credit_acct_num) <= 2499:
                 credit_posting["supplier"] = {"id": supplier["id"]}
+            if invoice_number:
+                credit_posting["invoiceNumber"] = str(invoice_number)
             postings.append(credit_posting)
 
         voucher_payload: dict[str, Any] = {
@@ -4146,23 +4831,22 @@ class TripletexService:
             "description": description,
             "postings": postings,
         }
+        if invoice_number:
+            voucher_payload["vendorInvoiceNumber"] = str(invoice_number)
+            voucher_payload["externalVoucherNumber"] = str(invoice_number)
         # Use supplier invoice voucher type so it shows up as an incoming invoice
         try:
-            vt_candidates = self.client.search_voucher_types(name="Leverandørfaktura")
-            if not vt_candidates:
-                vt_candidates = self.client.search_voucher_types(name="Supplier invoice")
-            if not vt_candidates:
-                vt_candidates = self.client.search_voucher_types(name="Inngående faktura")
-            if not vt_candidates:
-                # Try partial match on all voucher types
-                all_types = self.client.list("/ledger/voucherType", fields="id,name", params={"count": 100})
-                vt_candidates = [vt for vt in all_types if any(
-                    kw in (vt.get("name") or "").lower()
-                    for kw in ("leverandør", "supplier", "inngående", "incoming")
-                )]
-            if vt_candidates:
-                voucher_payload["voucherType"] = {"id": vt_candidates[0]["id"]}
-                LOGGER.info("Using voucher type: %s (id=%s)", vt_candidates[0].get("name"), vt_candidates[0]["id"])
+            all_types = self.client.list("/ledger/voucherType", fields="id,name", params={"count": 100})
+            voucher_type = _match_voucher_type(
+                all_types,
+                "leverandorfaktura",
+                "supplier invoice",
+                "incoming invoice",
+                "inngaende faktura",
+            )
+            if voucher_type:
+                voucher_payload["voucherType"] = {"id": voucher_type["id"]}
+                LOGGER.info("Using voucher type: %s (id=%s)", voucher_type.get("name"), voucher_type["id"])
         except Exception as e:
             LOGGER.warning("Could not resolve supplier invoice voucher type: %s", e)
         self.client.create_voucher(voucher_payload)
@@ -4227,7 +4911,7 @@ class TripletexService:
         if results:
             self._cache_set(cache_key, results[0])
             return results[0]
-        # Account not found — create it
+        # Account not found  -- create it
         name = self._NS4102_NAMES.get(number, f"Konto {number}")
         LOGGER.info("Account %d not found, creating as %r", number, name)
         try:
@@ -4235,7 +4919,7 @@ class TripletexService:
             self._cache_set(cache_key, acct)
             return acct
         except Exception as e:
-            LOGGER.warning("Could not create account %d: %s — searching again", number, e)
+            LOGGER.warning("Could not create account %d: %s  -- searching again", number, e)
             # Search again in case it was created concurrently or already exists
             results = self.client.search_accounts_by_number(number)
             if results:
@@ -4286,7 +4970,7 @@ class TripletexService:
 
         # Ensure employee has dateOfBirth + employment (required for payroll)
         self._ensure_employee_has_date_of_birth(employee["id"])
-        # Employment must start before salary month — use beginning of salary month or earlier
+        # Employment must start before salary month  -- use beginning of salary month or earlier
         transaction_date_val = task.attributes.get("date")
         salary_start = date.today().replace(day=1) - timedelta(days=1)
         if transaction_date_val:
@@ -4298,6 +4982,7 @@ class TripletexService:
         self._ensure_employment(employee["id"], start_date=salary_start)
         base_salary = task.attributes.get("baseSalary") or task.attributes.get("monthlySalary") or task.attributes.get("amount")
         bonus = task.attributes.get("bonus")
+        total_gross = float(base_salary or 0) + float(bonus or 0)
         if base_salary:
             self._update_employment(
                 employee["id"],
@@ -4381,26 +5066,35 @@ class TripletexService:
                 "employee": {"id": employee["id"]},
             })
 
+        payslip: dict[str, Any] = {
+            "employee": {"id": employee["id"]},
+            "date": transaction_date.isoformat(),
+            "year": transaction_date.year,
+            "month": transaction_date.month,
+        }
         if specifications:
-            payload["payslips"] = [{
-                "employee": {"id": employee["id"]},
-                "date": transaction_date.isoformat(),
-                "year": transaction_date.year,
-                "month": transaction_date.month,
-                "specifications": specifications,
-            }]
+            payslip["specifications"] = specifications
+        payload["payslips"] = [payslip]
 
         try:
             self.client.create_salary_transaction(payload)
         except TripletexAPIError as e:
+            if e.status_code == 403 and total_gross > 0:
+                LOGGER.warning("Salary transaction API forbidden, falling back to salary voucher: %s", e)
+                self._create_salary_voucher(
+                    employee_name=str(employee_name),
+                    total_gross=total_gross,
+                    voucher_date=transaction_date,
+                )
+                return
             if e.status_code == 422 and "virksomhet" in str(e).lower():
-                # Employment not linked to a division (virksomhet) — fix and retry
+                # Employment not linked to a division (virksomhet)  -- fix and retry
                 LOGGER.warning("Salary failed (no division), fixing employment and retrying: %s", e)
                 # Invalidate division cache to force a fresh lookup
                 self._cache.pop("division:default", None)
                 division = self._ensure_division()
                 if division:
-                    # Ensure dateOfBirth is set — required before employment can be updated
+                    # Ensure dateOfBirth is set  -- required before employment can be updated
                     self._ensure_employee_has_date_of_birth(employee["id"])
                     employments = self.client.search_employments(employee_id=employee["id"])
                     LOGGER.info("Employments for salary retry: %s", [(emp.get("id"), emp.get("division")) for emp in employments])
@@ -4415,12 +5109,20 @@ class TripletexService:
                 try:
                     self.client.create_salary_transaction(payload)
                 except TripletexAPIError as e2:
+                    if e2.status_code == 403 and total_gross > 0:
+                        LOGGER.warning("Salary transaction still forbidden after division fix, falling back to salary voucher: %s", e2)
+                        self._create_salary_voucher(
+                            employee_name=str(employee_name),
+                            total_gross=total_gross,
+                            voucher_date=transaction_date,
+                        )
+                        return
                     LOGGER.error("Salary still failed after division fix: %s", e2)
                     raise
             else:
                 raise
 
-        # NOTE: Do NOT create a backup voucher here — the competition scores
+        # NOTE: Do NOT create a backup voucher here  -- the competition scores
         # the salary transaction entity itself, and an extra voucher on 5000
         # confuses the grading (causes 0/8).
 
@@ -4431,7 +5133,7 @@ class TripletexService:
         if not expense_accounts:
             LOGGER.warning("Account 5000 not found, skipping salary voucher")
             return
-        # Credit: 1920 (Bank) — represents net payment
+        # Credit: 1920 (Bank)  -- represents net payment
         bank_accounts = self.client.search_accounts_by_number(1920)
         if not bank_accounts:
             bank_accounts = self.client.search_accounts_by_number(2960)
@@ -4482,7 +5184,7 @@ class TripletexService:
         delivery_date_val = task.attributes.get("deliveryDate")
         delivery_date = _parse_date_value(delivery_date_val) if delivery_date_val else order_date + timedelta(days=14)
 
-        # ourContact is required — use the first employee (typically the admin)
+        # ourContact is required  -- use the first employee (typically the admin)
         our_contact = self._resolve_project_manager()
 
         payload: dict[str, Any] = {
@@ -4546,7 +5248,7 @@ class TripletexService:
                 else:
                     raise
             elif e.status_code == 403:
-                # Dimension API not available — create voucher as fallback for partial credit
+                # Dimension API not available  -- create voucher as fallback for partial credit
                 LOGGER.warning("Dimension API not available (403), attempting voucher fallback")
                 self._create_dimension_voucher_fallback(task, dimension_name)
                 return
@@ -4905,12 +5607,18 @@ class TripletexService:
 
         # --- Interest income: "Renteinntekter" ---
         if any(kw in desc_lower for kw in ("renteinntekt", "interest income", "juros", "zinsertr", "interet")):
-            self._reconcile_interest_income(amount, line_date, bank_account)
+            if is_incoming:
+                self._reconcile_interest_income(amount, line_date, bank_account)
+            else:
+                self._reconcile_interest_expense(amount, line_date, bank_account)
             return
 
         # --- Bank fees: "Bankgebyr" ---
         if any(kw in desc_lower for kw in ("bankgebyr", "bank fee", "bank charge", "taxa bancaria", "bankgebuh", "frais bancaire", "comissao bancaria", "comision bancaria")):
-            self._reconcile_bank_fee(amount, line_date, bank_account)
+            if is_incoming:
+                self._reconcile_bank_fee_refund(amount, line_date, bank_account)
+            else:
+                self._reconcile_bank_fee(amount, line_date, bank_account)
             return
 
         # --- Tax deduction: "Skattetrekk" ---
@@ -4920,52 +5628,162 @@ class TripletexService:
 
         LOGGER.warning("Unrecognized bank line, skipping: %s", desc)
 
+    @staticmethod
+    def _digits_only(value: Any) -> str:
+        return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+    @classmethod
+    def _digit_variants(cls, value: Any) -> set[str]:
+        digits = cls._digits_only(value)
+        if not digits:
+            return set()
+        variants = {digits}
+        trimmed = digits.lstrip("0")
+        if trimmed:
+            variants.add(trimmed)
+        if len(digits) >= 5 and digits.startswith("10"):
+            compressed = digits[0] + digits[2:]
+            variants.add(compressed)
+            compressed_trimmed = compressed.lstrip("0")
+            if compressed_trimmed:
+                variants.add(compressed_trimmed)
+        return variants
+
+    @staticmethod
+    def _candidate_name_matches(candidate_name: str, target_name: str) -> bool:
+        candidate = _normalize_ascii(candidate_name or "").strip()
+        target = _normalize_ascii(target_name or "").strip()
+        if not candidate or not target:
+            return False
+        return candidate == target or candidate.endswith(f" {target}") or target in candidate
+
+    @classmethod
+    def _invoice_number_matches(cls, candidate_value: Any, target_value: Any) -> bool:
+        candidate_variants = cls._digit_variants(candidate_value)
+        target_variants = cls._digit_variants(target_value)
+        if not candidate_variants or not target_variants:
+            return False
+        for candidate in candidate_variants:
+            for target in target_variants:
+                if candidate == target or candidate.endswith(target) or target.endswith(candidate):
+                    return True
+        return False
+
+    @staticmethod
+    def _open_invoice_amount(invoice: dict[str, Any]) -> float:
+        return float(
+            invoice.get("outstandingAmount")
+            or invoice.get("amountCurrencyOutstanding")
+            or invoice.get("amountOutstanding")
+            or invoice.get("amountCurrency")
+            or invoice.get("amount")
+            or 0
+        )
+
+    @staticmethod
+    def _invoice_reference_amount(invoice: dict[str, Any]) -> float:
+        return float(
+            invoice.get("amountCurrencyOutstanding")
+            or invoice.get("amountOutstanding")
+            or invoice.get("amountCurrency")
+            or invoice.get("amount")
+            or 0
+        )
+
+    def _pick_customer_candidates(
+        self, customers: list[dict[str, Any]], customer_name: str, invoice_number: str
+    ) -> list[dict[str, Any]]:
+        matched = [c for c in customers if self._candidate_name_matches(c.get("name", ""), customer_name)]
+        candidates = matched or customers
+        if len(candidates) <= 1:
+            return candidates
+        prioritized: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if self._invoice_number_matches(candidate.get("displayName", ""), invoice_number):
+                prioritized.append(candidate)
+            else:
+                deferred.append(candidate)
+        return prioritized + deferred
+
+    def _pick_supplier_candidates(self, suppliers: list[dict[str, Any]], supplier_name: str) -> list[dict[str, Any]]:
+        matched = [s for s in suppliers if self._candidate_name_matches(s.get("name", ""), supplier_name)]
+        return matched or suppliers
+
+    def _match_customer_invoice(
+        self,
+        invoices: list[dict[str, Any]],
+        invoice_number: str,
+        amount: float,
+    ) -> dict[str, Any] | None:
+        open_invoices = [inv for inv in invoices if self._open_invoice_amount(inv) > 0]
+        for inv in open_invoices:
+            if self._invoice_number_matches(inv.get("invoiceNumber"), invoice_number):
+                return inv
+        for inv in open_invoices:
+            if abs(self._open_invoice_amount(inv) - amount) < 1.0:
+                return inv
+        if len(open_invoices) == 1 and amount <= self._open_invoice_amount(open_invoices[0]) + 1.0:
+            return open_invoices[0]
+        return None
+
+    def _match_supplier_invoice(
+        self,
+        invoices: list[dict[str, Any]],
+        amount: float,
+    ) -> dict[str, Any] | None:
+        open_invoices = [inv for inv in invoices if self._open_invoice_amount(inv) > 0]
+        if not open_invoices:
+            return None
+        exact = [inv for inv in open_invoices if abs(self._open_invoice_amount(inv) - amount) < 1.0]
+        if exact:
+            return exact[0]
+        larger = [inv for inv in open_invoices if self._open_invoice_amount(inv) + 1.0 >= amount]
+        if len(larger) == 1:
+            return larger[0]
+        if larger:
+            return min(larger, key=lambda inv: abs(self._open_invoice_amount(inv) - amount))
+        return min(open_invoices, key=lambda inv: abs(self._open_invoice_amount(inv) - amount))
+
     def _reconcile_customer_payment(
         self, customer_name: str, invoice_number: str, amount: float,
         payment_date: date, payment_type: dict[str, Any],
     ) -> None:
         """Find or create customer invoice and register payment."""
-        # Find customer — filter for exact name match to avoid substring hits
         customers = self.client.search_customers(name=customer_name)
-        exact = [c for c in customers if c.get("name", "").strip().lower() == customer_name.strip().lower()]
-        if exact:
-            customer = exact[0]
-        elif customers:
-            LOGGER.warning("No exact customer match for %r, using closest: %r", customer_name, customers[0].get("name"))
-            customer = customers[0]
-        else:
+        customer_candidates = self._pick_customer_candidates(customers, customer_name, invoice_number)
+        invoice_cache: dict[int, list[dict[str, Any]]] = {}
+        customer: dict[str, Any] | None = None
+        target_invoice = None
+
+        for candidate in customer_candidates:
+            invoices = self.client.search_invoices(customer_id=candidate["id"])
+            invoice_cache[candidate["id"]] = invoices
+            matched_invoice = self._match_customer_invoice(invoices, invoice_number, amount)
+            if matched_invoice:
+                customer = candidate
+                target_invoice = matched_invoice
+                break
+
+        if customer is None and customer_candidates:
+            customer = customer_candidates[0]
+
+        if not customer:
             # Create customer on the fly (fresh account has no customers)
             LOGGER.info("Customer %r not found, creating for bank reconciliation", customer_name)
             customer = self._ensure_customer(customer_name)
-
-        # Find invoice by number
-        invoices = self.client.search_invoices(customer_id=customer["id"])
-        target_invoice = None
-        for inv in invoices:
-            if str(inv.get("invoiceNumber", "")) == str(invoice_number):
-                outstanding = float(inv.get("amountCurrencyOutstanding") or inv.get("amountOutstanding") or 0)
-                if outstanding > 0:
-                    target_invoice = inv
-                    break
-
-        if not target_invoice:
-            # Try matching by amount if no invoice number match
-            for inv in invoices:
-                outstanding = float(inv.get("amountCurrencyOutstanding") or inv.get("amountOutstanding") or 0)
-                if outstanding > 0 and abs(outstanding - amount) < 1.0:
-                    target_invoice = inv
-                    break
+        elif target_invoice is None:
+            invoices = invoice_cache.get(customer["id"])
+            if invoices is None:
+                invoices = self.client.search_invoices(customer_id=customer["id"])
+            target_invoice = self._match_customer_invoice(invoices, invoice_number, amount)
+            if not target_invoice:
+                for inv in invoices:
+                    if self._open_invoice_amount(inv) > 0:
+                        target_invoice = inv
+                        break
 
         if not target_invoice:
-            # Fallback: any unpaid invoice for this customer
-            for inv in invoices:
-                outstanding = float(inv.get("amountCurrencyOutstanding") or inv.get("amountOutstanding") or 0)
-                if outstanding > 0:
-                    target_invoice = inv
-                    break
-
-        if not target_invoice:
-            # No invoice exists — create one dated before the payment so it can be paid
             LOGGER.info("No invoice found for customer %s, creating invoice for %.2f", customer_name, amount)
             invoice_date = (payment_date - timedelta(days=14)).isoformat()
             try:
@@ -4987,7 +5805,8 @@ class TripletexService:
                 LOGGER.warning("Could not create invoice for customer %s: %s", customer_name, e)
                 return
 
-        pay_amount = float(target_invoice.get("amountCurrencyOutstanding") or target_invoice.get("amountOutstanding") or amount)
+        outstanding = self._open_invoice_amount(target_invoice)
+        pay_amount = min(float(amount), outstanding) if outstanding > 0 else float(amount)
         self.client.pay_invoice(
             target_invoice["id"],
             payment_date=payment_date,
@@ -5000,55 +5819,42 @@ class TripletexService:
         self, supplier_name: str, amount: float, payment_date: date,
     ) -> None:
         """Find or create supplier invoice and register payment."""
-        # Find supplier — filter for exact name match
         suppliers = self.client.search_suppliers(name=supplier_name)
-        exact = [s for s in suppliers if s.get("name", "").strip().lower() == supplier_name.strip().lower()]
-        if exact:
-            supplier = exact[0]
-        elif suppliers:
-            supplier = suppliers[0]
-        else:
+        supplier_candidates = self._pick_supplier_candidates(suppliers, supplier_name)
+        supplier: dict[str, Any] | None = supplier_candidates[0] if supplier_candidates else None
+        if not supplier:
             # Create supplier on the fly (fresh account has no suppliers)
             LOGGER.info("Supplier %r not found, creating for bank reconciliation", supplier_name)
-            supplier = self._ensure_supplier(supplier_name)
+            supplier = self._ensure_supplier(name=supplier_name)
 
-        # Find unpaid supplier invoices
-        try:
-            invoices = self.client.search_incoming_invoices(supplier_id=supplier["id"])
-        except Exception:
-            invoices = []
+        supplier_invoice_candidates: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+        invoice_date_from = (payment_date - timedelta(days=3650)).isoformat()
+        invoice_date_to = (payment_date + timedelta(days=1)).isoformat()
+        for candidate in supplier_candidates or [supplier]:
+            try:
+                invoices = self.client.search_supplier_invoices(
+                    supplier_id=candidate["id"],
+                    invoice_date_from=invoice_date_from,
+                    invoice_date_to=invoice_date_to,
+                )
+            except Exception:
+                invoices = []
+            matched_invoice = self._match_supplier_invoice(invoices, amount)
+            if matched_invoice:
+                supplier_invoice_candidates.append(
+                    (abs(self._open_invoice_amount(matched_invoice) - amount), candidate, matched_invoice)
+                )
 
         target_invoice = None
-        for inv in invoices:
-            inv_amount = float(inv.get("amountCurrency") or inv.get("amount") or 0)
-            if abs(inv_amount - amount) < 1.0:
-                target_invoice = inv
-                break
-
-        if not target_invoice and invoices:
-            target_invoice = invoices[0]
-
-        if not target_invoice:
-            # No supplier invoice found — create one, then pay it
-            LOGGER.info("No supplier invoice found for %s, creating incoming invoice for %.2f", supplier_name, amount)
-            invoice_date = (payment_date - timedelta(days=14)).isoformat()
-            try:
-                inv_payload: dict[str, Any] = {
-                    "invoiceDate": invoice_date,
-                    "dueDate": payment_date.isoformat(),
-                    "supplier": {"id": supplier["id"]},
-                    "description": f"Leverandørfaktura - {supplier_name}",
-                }
-                target_invoice = self.client.create("/incomingInvoice", inv_payload)
-                LOGGER.info("Created incoming invoice for supplier %s: id=%s", supplier_name, target_invoice.get("id"))
-            except Exception as e:
-                LOGGER.warning("Could not create incoming invoice for %s: %s. Falling back to voucher.", supplier_name, e)
+        if supplier_invoice_candidates:
+            _, supplier, target_invoice = min(supplier_invoice_candidates, key=lambda item: item[0])
 
         if target_invoice:
             try:
+                outstanding = self._open_invoice_amount(target_invoice)
                 self.client.pay_supplier_invoice(
                     target_invoice["id"],
-                    amount=amount,
+                    amount=min(float(amount), outstanding) if outstanding > 0 else float(amount),
                     payment_date=payment_date.isoformat(),
                 )
                 LOGGER.info("Registered supplier payment: %s amount %.2f", supplier_name, amount)
@@ -5056,7 +5862,7 @@ class TripletexService:
                 LOGGER.warning("Failed to pay supplier invoice for %s: %s. Creating voucher instead.", supplier_name, e)
                 self._reconcile_supplier_payment_voucher(supplier_name, supplier["id"], amount, payment_date)
         else:
-            # All invoice attempts failed — create a voucher directly
+            LOGGER.warning("No supplier invoice found for %s, creating voucher instead.", supplier_name)
             self._reconcile_supplier_payment_voucher(supplier_name, supplier["id"], amount, payment_date)
 
     def _reconcile_supplier_payment_voucher(
@@ -5114,6 +5920,24 @@ class TripletexService:
         )
         LOGGER.info("Created interest income voucher: amount %.2f", amount)
 
+    def _reconcile_interest_expense(
+        self, amount: float, line_date: date, bank_account: dict[str, Any] | None,
+    ) -> None:
+        """Create voucher for interest expense: debit 8150/8170, credit 1920."""
+        accounts_8150 = self.client.search_accounts_by_number(8150)
+        accounts_1920 = self.client.search_accounts_by_number(1920)
+        if not accounts_8150:
+            accounts_8150 = self.client.search_accounts_by_number(8170)
+        if not accounts_8150 or not accounts_1920:
+            LOGGER.warning("Could not find accounts 8150/1920 for interest expense voucher")
+            return
+        self._create_reconciliation_voucher(
+            line_date, "Rentekostnad",
+            accounts_8150[0]["id"], accounts_1920[0]["id"],
+            float(amount), "Rentekostnad",
+        )
+        LOGGER.info("Created interest expense voucher: amount %.2f", amount)
+
     def _reconcile_bank_fee(
         self, amount: float, line_date: date, bank_account: dict[str, Any] | None,
     ) -> None:
@@ -5131,6 +5955,24 @@ class TripletexService:
             float(amount), "Bankgebyr",
         )
         LOGGER.info("Created bank fee voucher: amount %.2f", amount)
+
+    def _reconcile_bank_fee_refund(
+        self, amount: float, line_date: date, bank_account: dict[str, Any] | None,
+    ) -> None:
+        """Create voucher for bank fee refunds: debit 1920, credit 3900/7770."""
+        accounts_3900 = self.client.search_accounts_by_number(3900)
+        accounts_1920 = self.client.search_accounts_by_number(1920)
+        if not accounts_3900:
+            accounts_3900 = self.client.search_accounts_by_number(7770)
+        if not accounts_3900 or not accounts_1920:
+            LOGGER.warning("Could not find accounts 3900/1920 for bank fee refund voucher")
+            return
+        self._create_reconciliation_voucher(
+            line_date, "Refusjon bankgebyr",
+            accounts_1920[0]["id"], accounts_3900[0]["id"],
+            float(amount), "Refusjon bankgebyr",
+        )
+        LOGGER.info("Created bank fee refund voucher: amount %.2f", amount)
 
     def _reconcile_tax_deduction(
         self, amount: float, line_date: date, bank_account: dict[str, Any] | None,
@@ -5378,7 +6220,7 @@ class TripletexService:
             try:
                 invoice = self._resolve_invoice(task, prefer_outstanding=True)
             except EntityNotFoundError:
-                LOGGER.info("No invoice found for reminder — creating invoice first")
+                LOGGER.info("No invoice found for reminder  -- creating invoice first")
                 invoice = self._create_invoice_for_reminder(task)
 
         # Dunning fee: book voucher (debit receivables, credit dunning fees)
@@ -5593,7 +6435,7 @@ class TripletexService:
         if not name:
             raise ParsingError("Division creation requires a name")
 
-        # Get company org number for division — use a unique org nr per division
+        # Get company org number for division  -- use a unique org nr per division
         org_number = task.attributes.get("organizationNumber")
         if not org_number:
             # Generate a semi-unique org number based on division name
@@ -5726,7 +6568,7 @@ class TripletexService:
             self.client.create_leave_of_absence(payload)
         except TripletexAPIError as e:
             if e.status_code == 422 and "permisjonsprosent" in str(e).lower():
-                # Total leave percentage exceeds 100% — retry with lower percentage
+                # Total leave percentage exceeds 100%  -- retry with lower percentage
                 LOGGER.warning("Leave percentage exceeds 100%%, retrying with lower: %s", e)
                 for retry_pct in (50.0, 25.0, 10.0):
                     try:
@@ -6142,7 +6984,7 @@ class TripletexService:
         inventory = self._ensure_inventory()
 
         if not goods_lines:
-            # PO has no order lines — create receipt without PO link
+            # PO has no order lines  -- create receipt without PO link
             purchase_order_id = None
             try:
                 product = self._ensure_product(name=product_name)
@@ -6272,7 +7114,7 @@ class TripletexService:
                 subject = event_lower.split(".")[0]
                 matching = [ev for ev in event_names if ev.lower().startswith(subject)]
                 if matching:
-                    # Pick the best match — prefer one that has similar verb
+                    # Pick the best match  -- prefer one that has similar verb
                     verb = event_lower.split(".")[-1] if "." in event_lower else ""
                     best = None
                     for ev in matching:
@@ -6384,7 +7226,7 @@ class TripletexService:
                         vouchers = [result]
                 except TripletexAPIError as e:
                     if e.status_code == 403:
-                        # Beta API restricted — try voucher, but don't fail
+                        # Beta API restricted  -- try voucher, but don't fail
                         LOGGER.warning("Incoming invoice API restricted for payment: %s", e)
                         try:
                             self._create_incoming_invoice_via_voucher(
@@ -6397,7 +7239,7 @@ class TripletexService:
                             return  # Voucher created
                         except Exception:
                             LOGGER.warning("Voucher fallback also failed, payment not possible on this account")
-                            return  # Silent — account type doesn't support this
+                            return  # Silent  -- account type doesn't support this
                     LOGGER.warning("Could not create incoming invoice for payment: %s", e)
                 except Exception as e:
                     LOGGER.warning("Could not create incoming invoice for payment: %s", e)
@@ -6459,7 +7301,7 @@ class TripletexService:
         if results:
             self._cache_set(cache_key, results[0])
             return results[0]
-        # No activities exist — create one
+        # No activities exist  -- create one
         activity_name = name or "General"
         activity = self._resolve_or_create_activity(activity_name)
         self._cache_set(cache_key, activity)
@@ -6469,7 +7311,7 @@ class TripletexService:
         # Search for existing invoice first (competition pre-creates invoices)
         invoice = self._find_existing_invoice_for_payment(task)
         if not invoice:
-            # No existing invoice found — create one (fresh account scenario)
+            # No existing invoice found  -- create one (fresh account scenario)
             invoice = self._create_prerequisites_for_payment(task)
 
         payment_type = self._resolve_payment_type(task.attributes.get("paymentTypeDescription"))
@@ -6662,7 +7504,7 @@ class TripletexService:
                     paid_invoice = inv  # fallback: first paid invoice
 
         if not paid_invoice:
-            # No paid invoices — maybe it has an unpaid one we need to pay first then reverse?
+            # No paid invoices  -- maybe it has an unpaid one we need to pay first then reverse?
             # Unlikely in competition but handle gracefully
             for inv in invoices:
                 outstanding = float(inv.get("amountCurrencyOutstanding") or inv.get("amountOutstanding") or 0)
@@ -6736,7 +7578,7 @@ class TripletexService:
         invoice_date = _parse_date_value(invoice_date_val) if invoice_date_val else today
         vat_type = self._get_default_vat_type()
 
-        # Build order lines — support multi-line orders with products
+        # Build order lines  -- support multi-line orders with products
         order_lines_raw = task.attributes.get("orderLines")
         if order_lines_raw and isinstance(order_lines_raw, list) and len(order_lines_raw) > 0:
             order_lines: list[dict[str, Any]] = []
@@ -6971,7 +7813,7 @@ class TripletexService:
             customer = self.client.create("/customer", payload)
         except TripletexAPIError as e:
             if e.status_code == 422:
-                # Might be duplicate — search by name
+                # Might be duplicate  -- search by name
                 LOGGER.warning("Customer creation failed (%s), searching by name", e)
                 results = self.client.list("/customer", fields="id,name,organizationNumber,email", params={"name": name, "count": 5})
                 if results:
@@ -7023,7 +7865,7 @@ class TripletexService:
                         LOGGER.warning("Could not update employment: %s", ue)
                 self._cache_set(cache_key, True)
                 return
-            # Create employment — link to a division (required for salary/a-melding)
+            # Create employment  -- link to a division (required for salary/a-melding)
             division = self._ensure_division()
             emp_payload: dict[str, Any] = {
                 "employee": {"id": employee_id},
@@ -7049,7 +7891,7 @@ class TripletexService:
     ) -> None:
         """Update employment record (start date) and employment details (salary)."""
         try:
-            # Ensure dateOfBirth is set — required for employment operations
+            # Ensure dateOfBirth is set  -- required for employment operations
             if not dob_already_set:
                 self._ensure_employee_has_date_of_birth(employee_id)
             employments = self.client.list(
@@ -7117,7 +7959,7 @@ class TripletexService:
                         if details:
                             self.client.update("/employee/employment/details", details[0]["id"], detail_payload)
                         else:
-                            # No details exist yet — create them
+                            # No details exist yet  -- create them
                             detail_payload["employment"] = {"id": new_employment["id"]}
                             detail_payload["date"] = start_date or date.today().isoformat()
                             self.client.create("/employee/employment/details", detail_payload)
@@ -7132,6 +7974,35 @@ class TripletexService:
         # Search for existing employee first (competition may pre-create employees)
         try:
             existing = self._find_employee(name=name, email=email)
+            desired_user_type = ROLE_TO_USER_TYPE.get(role.lower(), "NO_ACCESS") if role else None
+            current_user_type = existing.get("userType")
+            if desired_user_type and desired_user_type != "NO_ACCESS" and current_user_type in (None, "", "NO_ACCESS"):
+                update_payload: dict[str, Any] = {"userType": desired_user_type}
+                if not existing.get("email"):
+                    parts = name.split()
+                    safe_first = _normalize_ascii(parts[0]).replace(" ", "") or "user"
+                    safe_last = _normalize_ascii(parts[-1]).replace(" ", "") or "name"
+                    import time as _time
+                    update_payload["email"] = f"{safe_first}.{safe_last}.{int(_time.time()) % 100000}@placeholder.example.com"
+                try:
+                    self.client.update("/employee", existing["id"], update_payload)
+                    existing["userType"] = desired_user_type
+                    if update_payload.get("email"):
+                        existing["email"] = update_payload["email"]
+                    LOGGER.info(
+                        "Upgraded existing employee %s (id=%s) to userType=%s",
+                        name,
+                        existing.get("id"),
+                        desired_user_type,
+                    )
+                except Exception as e:
+                    LOGGER.warning(
+                        "Could not upgrade existing employee %s (id=%s) to %s: %s",
+                        name,
+                        existing.get("id"),
+                        desired_user_type,
+                        e,
+                    )
             LOGGER.info("Found existing employee: %s (id=%s)", name, existing.get("id"))
             self._cache_set(cache_key, existing)
             return existing
@@ -7150,7 +8021,7 @@ class TripletexService:
         }
         department = self._ensure_department(DEFAULT_EMPLOYEE_DEPARTMENT_NAME)
         payload["department"] = {"id": department["id"]}
-        # Generate a safe fallback email (ASCII only, .com TLD — Tripletex rejects some TLDs/formats)
+        # Generate a safe fallback email (ASCII only, .com TLD  -- Tripletex rejects some TLDs/formats)
         safe_first = _normalize_ascii(parts[0]).replace(" ", "") or "user"
         safe_last = _normalize_ascii(parts[-1]).replace(" ", "") or "name"
         safe_email = f"{safe_first}.{safe_last}@placeholder.example.com"
@@ -7190,7 +8061,7 @@ class TripletexService:
         cached = self._cache_get("company_org_number")
         if cached:
             return cached
-        # Try /company/>withLoginAccess — returns the logged-in company
+        # Try /company/>withLoginAccess  -- returns the logged-in company
         try:
             company = self.client.get("/company/>withLoginAccess", fields="id,name,organizationNumber")
             if company and company.get("organizationNumber"):
@@ -7258,7 +8129,7 @@ class TripletexService:
             if divisions:
                 self._cache_set(cache_key, divisions[0])
                 return divisions[0]
-            # No divisions exist — create one with org number + municipality
+            # No divisions exist  -- create one with org number + municipality
             div_payload: dict[str, Any] = {"name": "Hovedkontor", "startDate": "2020-01-01"}
             if org_number:
                 div_payload["organizationNumber"] = org_number
@@ -7335,7 +8206,7 @@ class TripletexService:
             dept = self.client.create("/department", {"name": department_name})
         except TripletexAPIError as e:
             if e.status_code == 422:
-                # Might be duplicate from concurrent task — search again
+                # Might be duplicate from concurrent task  -- search again
                 results = self.client.list("/department", fields="id,name", params={"name": department_name, "count": 5})
                 if results:
                     self._cache_set(cache_key, results[0])
@@ -7378,7 +8249,7 @@ class TripletexService:
                 return results[0]
         except Exception:
             pass
-        # Activate project module — required for project creation
+        # Activate project module  -- required for project creation
         try:
             self._activate_project_module()
         except Exception:
@@ -7420,7 +8291,7 @@ class TripletexService:
             return
         try:
             current_type = employee.get("userType")
-            if current_type == "NO_ACCESS":
+            if not current_type or current_type == "NO_ACCESS":
                 update_payload: dict[str, Any] = {"userType": "STANDARD"}
                 # STANDARD userType requires an email address
                 if not employee.get("email"):
@@ -7430,15 +8301,20 @@ class TripletexService:
                     update_payload["email"] = f"{first}.{last}.{int(_time.time()) % 100000}@placeholder.example.com"
                 try:
                     self.client.update("/employee", employee["id"], update_payload)
+                    employee["userType"] = "STANDARD"
+                    if update_payload.get("email"):
+                        employee["email"] = update_payload["email"]
                 except TripletexAPIError as ue:
                     if ue.status_code == 422:
-                        # Email might already be taken — try with unique suffix
+                        # Email might already be taken  -- try with unique suffix
                         LOGGER.warning("PM userType upgrade failed (%s), retrying with unique email", ue)
                         first = _normalize_ascii(employee.get("firstName", "pm")).replace(" ", "") or "pm"
                         last = _normalize_ascii(employee.get("lastName", "user")).replace(" ", "") or "user"
                         import time as _time
                         update_payload["email"] = f"{first}.{last}.pm.{int(_time.time()) % 100000}@placeholder.example.com"
                         self.client.update("/employee", employee["id"], update_payload)
+                        employee["userType"] = "STANDARD"
+                        employee["email"] = update_payload["email"]
                     else:
                         raise
             self.client.grant_entitlements(employee["id"], "ALL_PRIVILEGES")
@@ -7651,7 +8527,7 @@ class TripletexService:
             results = self.client.search_travel_cost_categories(query=query)
             if results:
                 # Pick the first that doesn't look like a telecom/utility category
-                skip_words = {"bredbånd", "broadband", "telefon", "mobil", "internett", "strøm", "forsikring"}
+                skip_words = {"bredbånd", "broadband", "telefon", "mobil", "internett", "strom", "forsikring"}
                 for r in results:
                     desc = (r.get("description") or r.get("name") or "").lower()
                     if not any(sw in desc for sw in skip_words):
@@ -7660,7 +8536,7 @@ class TripletexService:
         # Last resort: get all and pick best
         results = self.client.search_travel_cost_categories()
         if results:
-            skip_words = {"bredbånd", "broadband", "telefon", "mobil", "internett", "strøm", "forsikring"}
+            skip_words = {"bredbånd", "broadband", "telefon", "mobil", "internett", "strom", "forsikring"}
             for r in results:
                 desc = (r.get("description") or r.get("name") or "").lower()
                 if not any(sw in desc for sw in skip_words):

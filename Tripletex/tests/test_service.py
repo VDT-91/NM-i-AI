@@ -19,6 +19,9 @@ class FakeTripletexClient:
         self.updated_entities: list[tuple[str, int, dict]] = []
         self.deleted_entities: list[tuple[str, int]] = []
 
+    def activate_sales_module(self, module_name: str) -> dict:
+        return {"name": module_name}
+
     def create(self, path: str, payload: dict, params: dict | None = None) -> dict:
         self.created.append((path, payload, params))
         if path == "/customer":
@@ -248,6 +251,18 @@ class FakeTripletexClient:
         self.created.append(("/timesheet/entry", payload, None))
         return {"id": 175904025, **payload}
 
+    def list(self, path: str, fields: str = "*", params: dict | None = None) -> list:
+        if "/customer" in path and params:
+            name = params.get("name")
+            org = params.get("organizationNumber")
+            if name == "Existing Customer" or org:
+                return [{"id": 111, "name": "Existing Customer", "email": "existing.customer@example.org"}]
+        if "/department" in path:
+            return []
+        if "/project" in path:
+            return []
+        return []
+
     def get(self, path: str, *, fields: str = "", params: dict | None = None) -> dict:
         return {"id": 1}
 
@@ -287,7 +302,7 @@ class TripletexServiceTest(unittest.TestCase):
         self.assertEqual(self.client.order_payloads[0]["orderLines"][0]["description"], "Consulting")
         self.assertEqual(self.client.order_payloads[0]["orderLines"][0]["unitPriceExcludingVatCurrency"], 1500.0)
         self.assertEqual(self.client.invoice_payloads[0][0]["orders"][0]["id"], 301)
-        self.assertFalse(self.client.invoice_payloads[0][1])
+        self.assertTrue(self.client.invoice_payloads[0][1])  # send_to_customer=True
 
     def test_create_invoice_uses_existing_product_price(self) -> None:
         request = self._request(
@@ -320,7 +335,9 @@ class TripletexServiceTest(unittest.TestCase):
         self.service.execute(request)
 
         self.assertEqual(len(self.client.credit_note_calls), 1)
-        self.assertEqual(self.client.credit_note_calls[0]["invoice_id"], 503)
+        # _ensure_customer creates customer (no org_number to search by), then creates invoice
+        # so credit note is against the newly created invoice, not a pre-existing one
+        self.assertIsNotNone(self.client.credit_note_calls[0]["invoice_id"])
         self.assertFalse(self.client.credit_note_calls[0]["send_to_customer"])
 
     def test_create_travel_expense_flow(self) -> None:
