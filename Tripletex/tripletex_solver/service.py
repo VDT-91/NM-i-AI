@@ -4541,6 +4541,13 @@ class TripletexService:
         return None
 
     def _create_incoming_invoice(self, task: ParsedTask) -> None:
+        # Activate modules that may unlock the incomingInvoice API
+        for mod in ("ACCOUNTING_OFFICE", "APPROVE_VOUCHER", "SMART", "UP_TO_100_VOUCHERS"):
+            try:
+                self.client.activate_sales_module(mod)
+            except Exception:
+                pass
+
         supplier_name = task.attributes.get("supplierName") or task.attributes.get("name") or task.target_name
         if not supplier_name:
             raise ParsingError("Incoming invoice requires a supplier name")
@@ -4948,9 +4955,8 @@ class TripletexService:
 
     def _create_salary_transaction(self, task: ParsedTask) -> None:
         # Activate wage module (required for salary transactions)
-        # Try WAGE first; only try SMART_WAGE if WAGE fails
         wage_active = False
-        for mod in ("WAGE", "SMART_WAGE"):
+        for mod in ("WAGE", "SMART_WAGE", "ACCOUNTING_OFFICE", "SMART"):
             if wage_active:
                 break
             try:
@@ -5127,37 +5133,83 @@ class TripletexService:
         # confuses the grading (causes 0/8).
 
     def _create_salary_voucher(self, *, employee_name: str, total_gross: float, voucher_date: date) -> None:
-        """Create a manual voucher on 5000-series to record salary cost."""
+        """Create a manual voucher with realistic salary postings."""
         # Debit: 5000 (Lønnskostnad / salary expense)
         expense_accounts = self.client.search_accounts_by_number(5000)
         if not expense_accounts:
             LOGGER.warning("Account 5000 not found, skipping salary voucher")
             return
-        # Credit: 1920 (Bank)  -- represents net payment
+        description = f"Lønn {employee_name}"
+
+        # Realistic Norwegian salary breakdown
+        tax_rate = 0.30  # ~30% tax withholding
+        employer_tax_rate = 0.141  # 14.1% arbeidsgiveravgift
+
+        tax_withholding = round(total_gross * tax_rate, 2)
+        net_pay = round(total_gross - tax_withholding, 2)
+        employer_contribution = round(total_gross * employer_tax_rate, 2)
+
+        postings: list[dict[str, Any]] = []
+        row = 1
+
+        # Debit 5000: Gross salary
+        postings.append({
+            "row": row, "date": voucher_date.isoformat(),
+            "description": description,
+            "account": {"id": expense_accounts[0]["id"]},
+            "amountGross": total_gross, "amountGrossCurrency": total_gross,
+        })
+        row += 1
+
+        # Debit 5400: Employer social security contribution (arbeidsgiveravgift)
+        aga_accounts = self.client.search_accounts_by_number(5400)
+        if aga_accounts:
+            postings.append({
+                "row": row, "date": voucher_date.isoformat(),
+                "description": f"Arbeidsgiveravgift {employee_name}",
+                "account": {"id": aga_accounts[0]["id"]},
+                "amountGross": employer_contribution, "amountGrossCurrency": employer_contribution,
+            })
+            row += 1
+
+        # Credit 2600: Tax withholding (Skattetrekk)
+        tax_accounts = self.client.search_accounts_by_number(2600)
+        if tax_accounts:
+            postings.append({
+                "row": row, "date": voucher_date.isoformat(),
+                "description": f"Skattetrekk {employee_name}",
+                "account": {"id": tax_accounts[0]["id"]},
+                "amountGross": -tax_withholding, "amountGrossCurrency": -tax_withholding,
+            })
+            row += 1
+
+        # Credit 2770: Employer social security payable
+        aga_payable = self.client.search_accounts_by_number(2770)
+        if aga_payable:
+            postings.append({
+                "row": row, "date": voucher_date.isoformat(),
+                "description": f"Skyldig arbeidsgiveravgift {employee_name}",
+                "account": {"id": aga_payable[0]["id"]},
+                "amountGross": -employer_contribution, "amountGrossCurrency": -employer_contribution,
+            })
+            row += 1
+
+        # Credit 1920: Net pay to bank
         bank_accounts = self.client.search_accounts_by_number(1920)
         if not bank_accounts:
             bank_accounts = self.client.search_accounts_by_number(2960)
-        if not bank_accounts:
-            LOGGER.warning("No credit account (1920/2960) found for salary voucher")
-            return
-        description = f"Lønn {employee_name}"
+        if bank_accounts:
+            postings.append({
+                "row": row, "date": voucher_date.isoformat(),
+                "description": f"Netto lønn {employee_name}",
+                "account": {"id": bank_accounts[0]["id"]},
+                "amountGross": -net_pay, "amountGrossCurrency": -net_pay,
+            })
+
         voucher_payload: dict[str, Any] = {
             "date": voucher_date.isoformat(),
             "description": description,
-            "postings": [
-                {
-                    "row": 1, "date": voucher_date.isoformat(),
-                    "description": description,
-                    "account": {"id": expense_accounts[0]["id"]},
-                    "amountGross": total_gross, "amountGrossCurrency": total_gross,
-                },
-                {
-                    "row": 2, "date": voucher_date.isoformat(),
-                    "description": description,
-                    "account": {"id": bank_accounts[0]["id"]},
-                    "amountGross": -total_gross, "amountGrossCurrency": -total_gross,
-                },
-            ],
+            "postings": postings,
         }
         self.client.create_voucher(voucher_payload)
         LOGGER.info("Created salary backup voucher: %s = %s on account 5000", employee_name, total_gross)
