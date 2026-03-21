@@ -706,6 +706,12 @@ class TripletexService:
             self._create_bank_statement(task)
             return
         if task.entity is Entity.ACCOUNT:
+            # Check if this is actually a ledger analysis → project creation task
+            # (LLM sometimes misclassifies as "account" instead of "project")
+            if self._is_ledger_analysis_project_task(task):
+                LOGGER.info("Redirecting account→project: detected ledger analysis task")
+                self._create_projects_from_ledger_analysis(task)
+                return
             self._create_account(task)
             return
         if task.entity is Entity.ORDER:
@@ -1646,12 +1652,15 @@ class TripletexService:
         prompt = task.raw_prompt or ""
         analysis_kw = ("analice", "analyze", "analyser", "analysier", "analysere",
                         "identifique", "identify", "identifiser", "identifisere",
-                        "libro mayor", "hovedbok", "ledger", "hauptbuch", "grand livre")
+                        "libro mayor", "hovedbok", "hovudboka", "ledger", "hauptbuch", "grand livre",
+                        "finn dei", "finn de")
         expense_kw = ("gastos", "expense", "utgift", "kostnad", "Aufwand", "charge",
-                       "despesa", "cuentas de gastos", "expense account")
+                       "despesa", "cuentas de gastos", "expense account",
+                       "kostnadskonto", "kostnadskon")
         multi_kw = ("cada una", "each of", "for each", "for every", "hver av",
                      "for kvar", "fur jede", "pour chaque", "para cada",
-                     "tre ", "three", "drei", "trois", "tres ")
+                     "tre ", "three", "drei", "trois", "tres ",
+                     "kvar av", "kvart prosjekt")
         has_analysis = _contains_any_ascii(prompt, analysis_kw)
         has_expense = _contains_any_ascii(prompt, expense_kw)
         has_project = _contains_any_ascii(prompt, ("proyecto", "project", "prosjekt", "Projekt", "projet"))
