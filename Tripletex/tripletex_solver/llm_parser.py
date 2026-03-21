@@ -175,7 +175,7 @@ employee, customer, department, product, project, invoice, payment, travel_expen
 
 **Company Module:** moduleName (SMART, PROJECT, WAGE, LOGISTICS, etc.)
 
-**Incoming Invoice:** supplierName, organizationNumber, invoiceDate, invoiceDueDate, amount (excl VAT), totalAmountIncludingVat (use this when prompt says "including VAT"/"inkl. mva"/"con IVA"/"TTC"/"einschließlich MwSt"), vatRate, invoiceNumber, debitAccountNumber, creditAccountNumber, departmentName, description (what the invoice is for)
+**Incoming Invoice:** supplierName, organizationNumber, invoiceDate, invoiceDueDate, amount (excl VAT), totalAmountIncludingVat (use this when prompt says "including VAT"/"inkl. mva"/"con IVA"/"TTC"/"einschließlich MwSt" OR when prices come from a receipt/kvittering where item prices INCLUDE VAT), vatRate, invoiceNumber, debitAccountNumber, creditAccountNumber, departmentName, description (what the invoice is for). NOTE: Norwegian receipts (kvittering) list prices INCLUDING MVA — use totalAmountIncludingVat for receipt amounts.
 
 **Purchase Order:** supplierName, orderDate, deliveryDate
 

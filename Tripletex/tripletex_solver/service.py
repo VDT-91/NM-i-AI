@@ -373,7 +373,7 @@ class TripletexService:
             Entity.PROJECT: ("SMART_PROJECT", "SMART"),
             Entity.TIMESHEET: ("SMART_TIME_TRACKING", "SMART"),
             Entity.SALARY_TRANSACTION: ("WAGE", "SMART"),
-            Entity.INCOMING_INVOICE: ("SMART", "APPROVE_VOUCHER"),
+            # Entity.INCOMING_INVOICE — modules activated in handler; API is BETA/restricted
             Entity.PURCHASE_ORDER: ("SMART",),
             Entity.TRAVEL_EXPENSE: ("SMART",),
             # Entity.INVOICE — no module needed; activating can invalidate session
@@ -3890,12 +3890,9 @@ class TripletexService:
     # --- Tier 3: Incoming Invoice (Supplier Invoice) ---
 
     def _create_incoming_invoice(self, task: ParsedTask) -> None:
-        # Activate required modules for incoming invoices
-        for mod in ("SMART", "APPROVE_VOUCHER", "AGRO", "KOMPLETT"):
-            try:
-                self.client.activate_sales_module(mod)
-            except Exception:
-                pass
+        # NOTE: POST /incomingInvoice is BETA/restricted (always 403 on competition).
+        # Skip module activation to avoid wasting API calls and risking session invalidation.
+        # We go straight to voucher fallback which doesn't need special modules.
 
         supplier_name = task.attributes.get("supplierName") or task.attributes.get("name") or task.target_name
         if not supplier_name:
@@ -3917,6 +3914,18 @@ class TripletexService:
         # Determine net amount (excl VAT) — handle both "amount" and "totalAmountIncludingVat"
         total_incl = task.attributes.get("totalAmountIncludingVat")
         raw_amount = task.attributes.get("amount")
+        amount_is_incl_vat = task.attributes.get("amountIsVatInclusive", False)
+
+        # Detect receipt/kvittering context — item prices on Norwegian receipts include VAT
+        prompt_lower = _normalize_ascii(task.raw_prompt or "")
+        is_receipt = any(kw in prompt_lower for kw in (
+            "kvittering", "receipt", "recibo", "quittung", "recu",
+            "herav mva", "inkl mva", "inkl. mva", "incl vat", "including vat",
+        ))
+        if is_receipt and not amount_is_incl_vat and total_incl is None:
+            amount_is_incl_vat = True
+            LOGGER.info("Receipt detected — treating amount as VAT-inclusive")
+
         if total_incl is not None:
             total_incl = float(total_incl)
             if vat_rate_f and vat_rate_f > 0:
@@ -3925,7 +3934,12 @@ class TripletexService:
                 net_amount = total_incl
             LOGGER.info("Using totalAmountIncludingVat=%.2f → net=%.2f (vatRate=%s)", total_incl, net_amount, vat_rate_f)
         elif raw_amount is not None:
-            net_amount = float(raw_amount)
+            raw_float = float(raw_amount)
+            if amount_is_incl_vat and vat_rate_f and vat_rate_f > 0:
+                net_amount = round(raw_float / (1 + vat_rate_f / 100), 2)
+                LOGGER.info("Amount %.2f is VAT-inclusive → net=%.2f (vatRate=%s)", raw_float, net_amount, vat_rate_f)
+            else:
+                net_amount = raw_float
         else:
             raise ParsingError("Incoming invoice requires an amount")
 
@@ -3952,29 +3966,12 @@ class TripletexService:
             amount_incl_vat = round(net_amount * (1 + vat_rate_f / 100), 2)
         else:
             amount_incl_vat = net_amount
+        LOGGER.info("POST /incomingInvoice payload: supplier=%s amount_incl_vat=%.2f net=%.2f vatRate=%s",
+                     supplier_name, amount_incl_vat, net_amount, vat_rate_f)
 
-        # Try proper POST /incomingInvoice?sendTo=ledger first (creates a real supplier invoice)
-        # Fall back to voucher approach if the endpoint is restricted (403)
-        try:
-            self._create_incoming_invoice_via_api(
-                supplier=supplier,
-                amount_incl_vat=amount_incl_vat,
-                invoice_date=invoice_date,
-                due_date=due_date,
-                description=voucher_desc,
-                invoice_number=inv_num,
-                debit_account_id=debit_accounts[0]["id"],
-                vat_rate=vat_rate_f,
-                department=department,
-            )
-            LOGGER.info("Created incoming invoice via /incomingInvoice API")
-            return
-        except TripletexAPIError as e:
-            if e.status_code in (403, 501):
-                LOGGER.warning("POST /incomingInvoice not available (status=%s), falling back to voucher", e.status_code)
-            else:
-                LOGGER.warning("POST /incomingInvoice failed (status=%s): %s — falling back to voucher", e.status_code, e)
-
+        # POST /incomingInvoice is BETA/restricted (always 403 on competition accounts).
+        # Skip the API attempt to save an API call and avoid potential session issues.
+        # Go directly to voucher fallback.
         LOGGER.info("Creating incoming invoice via voucher (supplier=%s, net=%.2f, vatRate=%s)", supplier_name, net_amount, vat_rate_f)
         try:
             self._create_incoming_invoice_via_voucher(
