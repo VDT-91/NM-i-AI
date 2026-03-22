@@ -5115,38 +5115,9 @@ class TripletexService:
         if vat_rate and vat_rate > 0:
             total_with_vat = round(amount * (1 + vat_rate / 100), 2)
 
-            # Try to use vatType on the expense posting (lets Tripletex handle VAT)
-            incoming_vat_type = self._resolve_incoming_vat_type(vat_rate)
-            if incoming_vat_type:
-                # 2-posting approach: expense with vatType + credit supplier
-                expense_posting: dict[str, Any] = {
-                    "row": 1, "date": posting_date, "description": description,
-                    "account": {"id": debit_account_id},
-                    "amountGross": total_with_vat,
-                    "amountGrossCurrency": total_with_vat,
-                    "vatType": {"id": incoming_vat_type["id"]},
-                }
-                if dept_ref:
-                    expense_posting["department"] = dept_ref
-                if invoice_number:
-                    expense_posting["invoiceNumber"] = str(invoice_number)
-                postings.append(expense_posting)
-
-                credit_posting: dict[str, Any] = {
-                    "row": 2, "date": posting_date, "description": description,
-                    "account": {"id": credit_accounts[0]["id"]},
-                    "amountGross": -total_with_vat,
-                    "amountGrossCurrency": -total_with_vat,
-                }
-                credit_acct_num = credit_accounts[0].get("number", 0)
-                if 2400 <= int(credit_acct_num) <= 2499:
-                    credit_posting["supplier"] = {"id": supplier["id"]}
-                if invoice_number:
-                    credit_posting["invoiceNumber"] = str(invoice_number)
-                postings.append(credit_posting)
-                LOGGER.info("Using vatType %s on expense posting for incoming invoice", incoming_vat_type.get("name"))
-            else:
-                # Fallback: manual 3-posting approach
+            # Always use manual 3-posting approach (expense net + VAT + credit gross)
+            # vatType on voucher postings may confuse scoring systems
+            if True:
                 vat_amount = round(total_with_vat - amount, 2)
                 expense_posting_m: dict[str, Any] = {
                     "row": 1, "date": posting_date, "description": description,
