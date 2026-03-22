@@ -1484,8 +1484,11 @@ class TripletexService:
             if unit:
                 payload["productUnit"] = {"id": unit["id"]}
 
-        # Set revenue account (default: 3000 Salgsinntekt)
-        acct_num = _safe_int(task.attributes.get("accountNumber"), fallback=3000)
+        # Set revenue account matching the product's VAT rate
+        # 0% VAT → 3100 (avgiftsfri), standard → 3000 (avgiftspliktig)
+        acct_num = _safe_int(task.attributes.get("accountNumber"), fallback=None)
+        if acct_num is None:
+            acct_num = 3100 if vat_pct == 0 else 3000
         try:
             rev_accounts = self.client.search_accounts_by_number(acct_num)
             if rev_accounts:
@@ -1498,6 +1501,11 @@ class TripletexService:
         except TripletexAPIError as e:
             if e.status_code == 422 and ("allerede" in str(e).lower() or "er i bruk" in str(e).lower()):
                 LOGGER.warning("Product '%s' already exists, skipping: %s", name, e)
+            elif e.status_code == 422 and "mva" in str(e).lower():
+                # Account VAT code mismatch — retry without account
+                LOGGER.warning("Account VAT mismatch for product '%s', retrying without account: %s", name, e)
+                payload.pop("account", None)
+                self.client.create("/product", payload)
             else:
                 raise
 
