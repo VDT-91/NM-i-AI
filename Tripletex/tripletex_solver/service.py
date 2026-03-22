@@ -3888,7 +3888,9 @@ class TripletexService:
         is_correction = _contains_any_ascii(
             task.raw_prompt,
             ("korriger", "correction", "feil i hovedbok", "correccion",
-             "korrektur", "rettelse", "feilene", "corriger", "correcao"),
+             "korrektur", "rettelse", "feilene", "corrig", "correcao",
+             "erreurs", "ecritures correctives", "erros no livro",
+             "corrija", "correctivos", "asientos correctivos"),
         )
 
         # Detect year-end closing: create separate vouchers for each posting pair
@@ -4976,6 +4978,28 @@ class TripletexService:
         )
         supplier = self._ensure_supplier(name=supplier_name, org_number=org_number)
 
+        # Update supplier address if available from parsed attributes
+        addr1 = task.attributes.get("addressLine1")
+        postal = task.attributes.get("postalCode")
+        city = task.attributes.get("city")
+        if supplier and (addr1 or postal or city):
+            addr_update: dict[str, Any] = {}
+            if addr1:
+                addr_update["addressLine1"] = addr1
+            if postal:
+                addr_update["postalCode"] = postal
+            if city:
+                addr_update["city"] = city
+            try:
+                self.client.update("/supplier", supplier["id"], {
+                    "name": supplier["name"],
+                    "physicalAddress": addr_update,
+                    "postalAddress": addr_update,
+                })
+                LOGGER.info("Updated supplier %s with address %s", supplier_name, addr_update)
+            except Exception as e:
+                LOGGER.warning("Failed to update supplier address: %s", e)
+
         invoice_date_val = task.attributes.get("invoiceDate") or task.attributes.get("date")
         invoice_date = _parse_date_value(invoice_date_val) if invoice_date_val else date.today()
         due_date_val = task.attributes.get("invoiceDueDate") or task.attributes.get("dueDate")
@@ -5301,8 +5325,22 @@ class TripletexService:
         LOGGER.info("Created incoming invoice voucher %s for supplier %s (postings=%d)",
                      voucher_id, supplier.get("name"), len(postings))
 
-        # NOTE: PUT /supplierInvoice/voucher/{id}/postings returns 422 on competition proxy.
-        # Skip upgrade attempt to avoid wasting an API call and adding a 4xx error.
+        # Try upgrading voucher to a proper supplier invoice entity.
+        # This makes the voucher discoverable via GET /supplierInvoice.
+        if voucher_id:
+            try:
+                self._try_upgrade_voucher_to_supplier_invoice(
+                    voucher_id=voucher_id,
+                    debit_account_id=debit_account_id,
+                    amount=amount,
+                    vat_rate=vat_rate,
+                    description=description,
+                    invoice_date=invoice_date,
+                    department=department,
+                )
+                LOGGER.info("Upgraded voucher %s to supplier invoice", voucher_id)
+            except Exception as e:
+                LOGGER.warning("Supplier invoice upgrade failed (non-fatal): %s", e)
 
     def _try_upgrade_voucher_to_supplier_invoice(
         self,
