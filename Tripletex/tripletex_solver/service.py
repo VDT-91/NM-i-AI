@@ -2440,7 +2440,21 @@ class TripletexService:
         if department_name:
             department = self._ensure_department(department_name)
             payload["department"] = {"id": department["id"]}
-        travel_expense = self.client.create_travel_expense(payload)
+        try:
+            travel_expense = self.client.create_travel_expense(payload)
+        except TripletexAPIError as e:
+            if e.status_code == 422 and "employee" in str(e).lower():
+                # Retry without employee field — defaults to session user
+                LOGGER.warning("Travel expense creation rejected with employee.id, retrying without employee field")
+                payload_no_emp = {k: v for k, v in payload.items() if k != "employee"}
+                try:
+                    travel_expense = self.client.create_travel_expense(payload_no_emp)
+                except TripletexAPIError:
+                    LOGGER.warning("Travel expense creation failed without employee too, falling back to voucher")
+                    self._create_travel_expense_voucher_fallback(task, employee, departure_date, return_date)
+                    return
+            else:
+                raise
 
         # Per diem compensation (dietas / kostgodtgjørelse / per diem)
         per_diem = task.attributes.get("perDiem") or task.attributes.get("hasPerDiem")
@@ -2614,6 +2628,80 @@ class TripletexService:
             LOGGER.info("Approved travel expense %s", travel_expense["id"])
         except Exception as e:
             LOGGER.warning("Could not approve travel expense %s: %s", travel_expense["id"], e)
+
+    def _create_travel_expense_voucher_fallback(
+        self, task: ParsedTask, employee: dict[str, Any],
+        departure_date: date, return_date: date,
+    ) -> None:
+        """Fallback: create a voucher for travel expense when the API rejects it."""
+        LOGGER.info("Creating travel expense as voucher fallback")
+        total_amount = 0.0
+        description_parts = []
+
+        # Per diem
+        per_diem_rate = task.attributes.get("perDiemRate")
+        per_diem_days = task.attributes.get("perDiemDays")
+        if not per_diem_days:
+            per_diem_days = (return_date - departure_date).days + 1
+        if per_diem_rate:
+            per_diem_total = float(per_diem_rate) * int(per_diem_days)
+            total_amount += per_diem_total
+            description_parts.append(f"Diett {per_diem_days}d x {per_diem_rate} = {per_diem_total}")
+
+        # Expense lines
+        expense_lines = task.attributes.get("expenseLines")
+        if expense_lines and isinstance(expense_lines, list):
+            for line in expense_lines:
+                line_amount = line.get("amount")
+                line_desc = line.get("description", "Utlegg")
+                if line_amount:
+                    total_amount += float(line_amount)
+                    description_parts.append(f"{line_desc} {line_amount}")
+
+        # Single amount fallback
+        if not description_parts:
+            amount = task.attributes.get("amount")
+            if amount:
+                total_amount = float(amount)
+                description_parts.append(f"Reisekostnad {amount}")
+
+        if total_amount <= 0:
+            LOGGER.warning("No travel expense amount to post as voucher")
+            return
+
+        emp_name = f"{employee.get('firstName', '')} {employee.get('lastName', '')}".strip()
+        title = task.attributes.get("title") or task.attributes.get("purpose") or "Reiseregning"
+        voucher_desc = f"Reiseregning - {emp_name} - {title}"
+
+        accounts_7140 = self.client.search_accounts_by_number(7140)
+        if not accounts_7140:
+            accounts_7140 = self.client.search_accounts_by_number(7100)
+        accounts_1920 = self.client.search_accounts_by_number(1920)
+        if not accounts_7140 or not accounts_1920:
+            LOGGER.warning("Could not find accounts 7140/1920 for travel expense voucher")
+            return
+
+        postings = [
+            {
+                "account": {"id": accounts_7140[0]["id"]},
+                "amountGross": total_amount,
+                "amountGrossCurrency": total_amount,
+                "description": "; ".join(description_parts),
+            },
+            {
+                "account": {"id": accounts_1920[0]["id"]},
+                "amountGross": -total_amount,
+                "amountGrossCurrency": -total_amount,
+                "description": "; ".join(description_parts),
+            },
+        ]
+        voucher_payload = {
+            "date": departure_date.isoformat(),
+            "description": voucher_desc,
+            "postings": postings,
+        }
+        self.client.create_voucher(voucher_payload)
+        LOGGER.info("Created travel expense voucher fallback: %s total=%.2f", voucher_desc, total_amount)
 
     def _update_employee(self, task: ParsedTask) -> None:
         emp_name = task.target_name
@@ -5675,9 +5763,9 @@ class TripletexService:
             self._reconcile_customer_payment(customer_name, invoice_number, amount, line_date, payment_type)
             return
 
-        # --- Supplier payment (outgoing): "Betaling Fornecedor/Proveedor/Leverandør X" ---
+        # --- Supplier payment (outgoing): "Betaling Fornecedor/Proveedor/Leverandør/Lieferant X" ---
         supplier_payment_match = _re.search(
-            r"(?:betaling\s+(?:fornecedor|proveedor|leverand.r|supplier|til|fournisseur)|pagamento?\s+(?:fornecedor|a)\s+|payment\s+(?:to|supplier)|zahlung\s+(?:an|lieferant)|paiement\s+(?:a|fournisseur))\s+(.+)",
+            r"(?:betaling\s+(?:fornecedor|proveedor|leverand.r|supplier|til|fournisseur|lieferant)|pagamento?\s+(?:fornecedor|a)\s+|payment\s+(?:to|supplier)|zahlung\s+(?:an|lieferant)|paiement\s+(?:a|fournisseur))\s+(.+)",
             desc, _re.IGNORECASE,
         )
         if supplier_payment_match and not is_incoming:
