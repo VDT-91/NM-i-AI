@@ -3928,8 +3928,9 @@ class TripletexService:
 
         salary_provision_kw = (
             "provisão salarial", "provisao salarial", "lønnsavsetning",
-            "lonnsavsetning", "salary provision", "gehaltsrückstellung",
-            "gehaltsruckstellung", "provision salariale", "provisión salarial",
+            "lonnsavsetning", "salary provision", "salary accrual",
+            "gehaltsrückstellung", "gehaltsruckstellung", "provision salariale",
+            "provisión salarial", "lonnsperiodisering",
         )
         if not _contains_any_ascii(prompt, salary_provision_kw):
             return
@@ -3958,6 +3959,49 @@ class TripletexService:
             credit_num = int(acct_match.group(2))
 
         amount = self._extract_salary_provision_amount(prompt)
+        if amount is None or amount <= 0:
+            # Try to estimate from ledger: sum recent salary expense postings
+            try:
+                recent = self.client.list(
+                    "/ledger/posting",
+                    fields="id,amount,account(id,number)",
+                    params={
+                        "dateFrom": (voucher_date - timedelta(days=60)).isoformat(),
+                        "dateTo": voucher_date.isoformat(),
+                        "accountNumberFrom": str(debit_num),
+                        "accountNumberTo": str(debit_num),
+                        "count": 100,
+                    },
+                )
+                salary_amounts = [abs(float(p.get("amount", 0))) for p in recent if float(p.get("amount", 0)) > 0]
+                if salary_amounts:
+                    amount = max(salary_amounts)
+                    LOGGER.info("Estimated salary accrual from ledger: %.2f", amount)
+            except Exception:
+                pass
+        if amount is None or amount <= 0:
+            # Try from employment details
+            try:
+                employees = self.client.list("/employee", fields="id,firstName,lastName", params={"count": 10})
+                for emp in employees[:5]:
+                    emps = self.client.list(
+                        "/employee/employment",
+                        fields="id,employmentDetails(id,monthlySalary,annualSalary)",
+                        params={"employeeId": emp["id"], "count": 1},
+                    )
+                    for employment in emps:
+                        details = employment.get("employmentDetails") or []
+                        for d in (details if isinstance(details, list) else [details]):
+                            ms = d.get("monthlySalary") or 0
+                            ans = d.get("annualSalary") or 0
+                            sal = float(ms) if ms else float(ans) / 12 if ans else 0
+                            if sal > 0:
+                                amount = (amount or 0) + sal
+                if amount and amount > 0:
+                    amount = round(amount, 2)
+                    LOGGER.info("Estimated salary accrual from employment: %.2f", amount)
+            except Exception:
+                pass
         if amount is None or amount <= 0:
             LOGGER.warning("Cannot determine salary provision amount, skipping")
             return
