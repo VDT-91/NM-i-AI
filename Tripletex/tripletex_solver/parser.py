@@ -1266,6 +1266,23 @@ class PromptParser:
 
         return task
 
+    @staticmethod
+    def _is_ledger_analysis_prompt(prompt: str) -> bool:
+        """Detect ledger analysis prompts where project names come from the ledger, not the prompt."""
+        norm = _normalize_ascii(prompt)
+        analysis_kw = ("analice", "analyze", "analyser", "analysier", "analysere",
+                        "identifique", "identify", "identifiser", "identifisere",
+                        "libro mayor", "hovedbok", "hovudboka", "ledger", "hauptbuch", "grand livre",
+                        "finn dei", "finn de")
+        expense_kw = ("gastos", "expense", "utgift", "kostnad", "aufwand", "charge",
+                       "despesa", "cuentas de gastos", "expense account",
+                       "kostnadskonto", "kostnadskon", "costos", "costo")
+        project_kw = ("proyecto", "project", "prosjekt", "projekt", "projet", "projeto")
+        has_analysis = any(_normalize_ascii(kw) in norm for kw in analysis_kw)
+        has_expense = any(_normalize_ascii(kw) in norm for kw in expense_kw)
+        has_project = any(_normalize_ascii(kw) in norm for kw in project_kw)
+        return has_analysis and has_expense and has_project
+
     def _parse_project(self, prompt: str, task: ParsedTask) -> ParsedTask:
         rename_values = _extract_rename_values(prompt)
         name = _extract_name(prompt, ENTITY_KEYWORDS[Entity.PROJECT])
@@ -1273,6 +1290,10 @@ class PromptParser:
         if task.action is Action.DELETE and task.identifier is not None and not effective_name:
             return task
         if not effective_name and task.action is Action.CREATE:
+            # Check if this is a ledger analysis task (names come from ledger, not prompt)
+            if self._is_ledger_analysis_prompt(prompt):
+                task.attributes["isLedgerAnalysis"] = True
+                return task
             raise ParsingError("Could not extract project name from prompt")
         if effective_name:
             task.target_name = effective_name

@@ -128,6 +128,7 @@ employee, customer, department, product, project, invoice, payment, travel_expen
 - fixed asset/anleggsmiddel/activo fijo/Anlagevermögen → asset
 - dimension/dimensjon/dimensión/dimensão → dimension
 - account/konto/cuenta/compte → account
+- "analyze ledger + create projects for top expense accounts" → entity: "project", set isLedgerAnalysis: true in attributes (project names come from ledger analysis, NOT the prompt)
 - activity/aktivitet/actividad/Aktivität → activity
 - division/divisjon/división/Abteilung → division
 - warehouse/lager/almacén/Warenlager → inventory
@@ -352,6 +353,29 @@ def parse_with_llm(prompt: str, *, few_shot_text: str = "") -> ParsedTask:
         identifier=data.get("identifier"),
         attributes=attributes,
     )
+
+    # --- Entity correction: ledger analysis → project creation ---
+    # When the prompt asks to analyze the ledger and create projects for top expense
+    # accounts, the LLM may classify it as entity=project but fail to extract a name
+    # (since names come from the ledger analysis). Flag it so the service layer knows.
+    _LEDGER_ANALYSIS_KW = ("analice", "analyze", "analyser", "analysier", "analysere",
+                           "identifique", "identify", "identifiser", "identifisere",
+                           "libro mayor", "hovedbok", "hovudboka", "ledger", "hauptbuch",
+                           "grand livre", "finn dei", "finn de", "livro razao")
+    _LEDGER_EXPENSE_KW = ("gastos", "expense", "utgift", "kostnad", "aufwand", "charge",
+                          "despesa", "cuentas de gastos", "expense account",
+                          "kostnadskonto", "kostnadskon", "costos", "costo")
+    _LEDGER_PROJECT_KW = ("proyecto", "project", "prosjekt", "projekt", "projet", "projeto")
+    if (
+        task.action is Action.CREATE
+        and task.entity in (Entity.PROJECT, Entity.ACCOUNT)
+        and _contains_any_ascii(prompt, _LEDGER_ANALYSIS_KW)
+        and _contains_any_ascii(prompt, _LEDGER_EXPENSE_KW)
+        and _contains_any_ascii(prompt, _LEDGER_PROJECT_KW)
+    ):
+        task.entity = Entity.PROJECT
+        task.attributes["isLedgerAnalysis"] = True
+        LOGGER.info("Flagged as ledger analysis project task")
 
     # --- Entity correction: fixed-price project + milestone invoice ---
     # When the prompt says "set fixed price on project X + invoice the customer",

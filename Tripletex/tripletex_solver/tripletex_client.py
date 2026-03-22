@@ -58,7 +58,7 @@ class TripletexClient:
         query = dict(params or {})
         sanitized_json_body = (
             _strip_internal_keys(json_body)
-            if path == "/ledger/voucher" and json_body is not None
+            if path.startswith("/ledger/voucher") and json_body is not None
             else json_body
         )
         request_url = self._url(path)
@@ -763,6 +763,23 @@ class TripletexClient:
             "/supplierInvoice",
             fields="id,invoiceNumber,invoiceDate,invoiceDueDate,amount,amountCurrency,outstandingAmount,supplier(id,name),voucher(id)",
             params=params,
+        )
+
+    def put_supplier_invoice_postings(
+        self,
+        voucher_id: int,
+        postings: list[dict[str, Any]],
+        *,
+        send_to_ledger: bool = True,
+        voucher_date: str | None = None,
+    ) -> dict[str, Any]:
+        """PUT /supplierInvoice/voucher/{id}/postings — register a voucher as a supplier invoice."""
+        params: dict[str, Any] = {"sendToLedger": send_to_ledger}
+        if voucher_date:
+            params["voucherDate"] = voucher_date
+        return self._unwrap_value(
+            self._request("PUT", f"/supplierInvoice/voucher/{voucher_id}/postings",
+                          params=params, json_body=postings)
         )
 
     def approve_incoming_invoice(self, invoice_id: int) -> None:
