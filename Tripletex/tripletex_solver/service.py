@@ -2762,18 +2762,23 @@ class TripletexService:
             LOGGER.warning("Could not find accounts 7140/1920 for travel expense voucher")
             return
 
+        posting_desc = "; ".join(description_parts)
         postings = [
             {
+                "row": 1,
+                "date": departure_date.isoformat(),
                 "account": {"id": accounts_7140[0]["id"]},
                 "amountGross": total_amount,
                 "amountGrossCurrency": total_amount,
-                "description": "; ".join(description_parts),
+                "description": posting_desc,
             },
             {
+                "row": 2,
+                "date": departure_date.isoformat(),
                 "account": {"id": accounts_1920[0]["id"]},
                 "amountGross": -total_amount,
                 "amountGrossCurrency": -total_amount,
-                "description": "; ".join(description_parts),
+                "description": posting_desc,
             },
         ]
         voucher_payload = {
