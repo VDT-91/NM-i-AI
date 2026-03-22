@@ -802,7 +802,7 @@ class TestIncomingInvoiceVATEdgeCases(unittest.TestCase):
         )
 
     def test_15_percent_vat_food(self):
-        """15% VAT (food) produces correct 3-line voucher."""
+        """15% VAT (food) produces correct voucher with vatType or manual split."""
         task = _task(
             entity=Entity.INCOMING_INVOICE,
             raw_prompt='Invoice from Catering AS for 11500 NOK incl 15% VAT. Account 4000.',
@@ -817,13 +817,19 @@ class TestIncomingInvoiceVATEdgeCases(unittest.TestCase):
 
         voucher = self.client.voucher_payloads[0]
         postings = voucher["postings"]
-        self.assertEqual(len(postings), 3)
-        # Net = 11500 / 1.15 = 10000
-        self.assertAlmostEqual(postings[0]["amountGross"], 10000.0)
-        # VAT = 1500
-        self.assertAlmostEqual(postings[1]["amountGross"], 1500.0)
-        # Credit = -11500
-        self.assertAlmostEqual(postings[2]["amountGross"], -11500.0)
+        # With vatType: 2 postings (expense with vatType + credit)
+        # Without vatType: 3 postings (expense + VAT + credit)
+        self.assertIn(len(postings), (2, 3))
+        if len(postings) == 2:
+            # vatType approach: expense = total incl VAT, credit = -total
+            self.assertAlmostEqual(postings[0]["amountGross"], 11500.0)
+            self.assertAlmostEqual(postings[1]["amountGross"], -11500.0)
+            self.assertIn("vatType", postings[0])
+        else:
+            # Manual split: net + VAT + credit
+            self.assertAlmostEqual(postings[0]["amountGross"], 10000.0)
+            self.assertAlmostEqual(postings[1]["amountGross"], 1500.0)
+            self.assertAlmostEqual(postings[2]["amountGross"], -11500.0)
 
     def test_zero_vat_exempt(self):
         """0% VAT produces 2-line voucher (no VAT line)."""
@@ -860,10 +866,15 @@ class TestIncomingInvoiceVATEdgeCases(unittest.TestCase):
 
         voucher = self.client.voucher_payloads[0]
         postings = voucher["postings"]
-        self.assertEqual(len(postings), 3)
-        self.assertAlmostEqual(postings[0]["amountGross"], 10000.0)
-        self.assertAlmostEqual(postings[1]["amountGross"], 2500.0)
-        self.assertAlmostEqual(postings[2]["amountGross"], -12500.0)
+        # With vatType: 2 postings; without: 3 postings
+        self.assertIn(len(postings), (2, 3))
+        if len(postings) == 2:
+            self.assertAlmostEqual(postings[0]["amountGross"], 12500.0)
+            self.assertAlmostEqual(postings[1]["amountGross"], -12500.0)
+        else:
+            self.assertAlmostEqual(postings[0]["amountGross"], 10000.0)
+            self.assertAlmostEqual(postings[1]["amountGross"], 2500.0)
+            self.assertAlmostEqual(postings[2]["amountGross"], -12500.0)
 
 
 # ===========================================================================

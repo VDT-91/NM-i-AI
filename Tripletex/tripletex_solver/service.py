@@ -4852,6 +4852,28 @@ class TripletexService:
         LOGGER.info("POST /incomingInvoice payload: supplier=%s amount_incl_vat=%.2f vatTypeId=%s", supplier.get("name"), amount_incl_vat, vat_type_id)
         self.client.create_incoming_invoice(payload, send_to="ledger")
 
+    def _resolve_incoming_vat_type(self, vat_rate: float) -> dict[str, Any] | None:
+        """Find the incoming (purchase/inngående) VAT type for a given rate."""
+        cache_key = f"incoming_vat_type:{vat_rate}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+        all_types = self.client.search_vat_types()
+        # Prefer types with "fradrag" or "inngående" in name (incoming/purchase VAT)
+        for vt in all_types:
+            pct = float(vt.get("percentage", -1))
+            name_lower = (vt.get("name") or "").lower()
+            if abs(pct - vat_rate) < 0.01 and ("fradrag" in name_lower or "inng" in name_lower):
+                self._cache_set(cache_key, vt)
+                LOGGER.info("Resolved incoming VAT type: %s (id=%s, %.0f%%)", vt.get("name"), vt["id"], pct)
+                return vt
+        # Fallback: any matching rate
+        for vt in all_types:
+            if abs(float(vt.get("percentage", -1)) - vat_rate) < 0.01:
+                self._cache_set(cache_key, vt)
+                return vt
+        return None
+
     def _create_incoming_invoice_via_voucher(
         self,
         *,
@@ -4864,72 +4886,95 @@ class TripletexService:
         vat_rate: float | None = None,
         department: dict[str, Any] | None = None,
     ) -> None:
-        """Fallback: create a voucher with debit/credit postings to represent an incoming invoice.
-        Uses supplier account 2400 as credit (with supplier ref) and expense as debit.
-        If VAT rate is provided, adds a separate VAT posting on account 2710.
+        """Fallback: create a voucher to represent an incoming invoice.
+
+        Uses vatType on expense posting so Tripletex handles VAT internally,
+        making the voucher behave like a proper incoming invoice.
         `amount` is always NET (excluding VAT).
         """
         # Credit account: 2400 (leverandørgjeld) with supplier reference
         credit_accounts = self.client.search_accounts_by_number(2400)
         if not credit_accounts:
-            # Fallback to bank
             credit_accounts = self.client.search_accounts_by_number(1920)
         if not credit_accounts:
             LOGGER.warning("No credit account found for voucher fallback")
             return
 
         postings: list[dict[str, Any]] = []
-        row = 1
         posting_date = invoice_date.isoformat()
-
         dept_ref = {"id": department["id"]} if department else None
 
         if vat_rate and vat_rate > 0:
-            # 3-line voucher: expense (net) + VAT debit + supplier credit (total)
             total_with_vat = round(amount * (1 + vat_rate / 100), 2)
-            vat_amount = round(total_with_vat - amount, 2)
 
-            # Debit: expense account (net amount)
-            expense_posting: dict[str, Any] = {
-                "row": row, "date": posting_date, "description": description,
-                "account": {"id": debit_account_id},
-                "amountGross": amount, "amountGrossCurrency": amount,
-            }
-            if dept_ref:
-                expense_posting["department"] = dept_ref
-            if invoice_number:
-                expense_posting["invoiceNumber"] = str(invoice_number)
-            postings.append(expense_posting)
-            row += 1
-
-            # Debit: incoming VAT account 2710
-            vat_accounts = self.client.search_accounts_by_number(2710)
-            if vat_accounts:
-                vat_posting: dict[str, Any] = {
-                    "row": row, "date": posting_date, "description": f"MVA {description}",
-                    "account": {"id": vat_accounts[0]["id"]},
-                    "amountGross": vat_amount, "amountGrossCurrency": vat_amount,
+            # Try to use vatType on the expense posting (lets Tripletex handle VAT)
+            incoming_vat_type = self._resolve_incoming_vat_type(vat_rate)
+            if incoming_vat_type:
+                # 2-posting approach: expense with vatType + credit supplier
+                expense_posting: dict[str, Any] = {
+                    "row": 1, "date": posting_date, "description": description,
+                    "account": {"id": debit_account_id},
+                    "amountGross": total_with_vat,
+                    "amountGrossCurrency": total_with_vat,
+                    "vatType": {"id": incoming_vat_type["id"]},
                 }
+                if dept_ref:
+                    expense_posting["department"] = dept_ref
                 if invoice_number:
-                    vat_posting["invoiceNumber"] = str(invoice_number)
-                postings.append(vat_posting)
-                row += 1
+                    expense_posting["invoiceNumber"] = str(invoice_number)
+                postings.append(expense_posting)
 
-            # Credit: supplier account (total with VAT)
-            credit_posting: dict[str, Any] = {
-                "row": row, "date": posting_date, "description": description,
-                "account": {"id": credit_accounts[0]["id"]},
-                "amountGross": -total_with_vat, "amountGrossCurrency": -total_with_vat,
-            }
-            # Add supplier reference if credit is 2400
-            credit_acct_num = credit_accounts[0].get("number", 0)
-            if 2400 <= int(credit_acct_num) <= 2499:
-                credit_posting["supplier"] = {"id": supplier["id"]}
-            if invoice_number:
-                credit_posting["invoiceNumber"] = str(invoice_number)
-            postings.append(credit_posting)
+                credit_posting: dict[str, Any] = {
+                    "row": 2, "date": posting_date, "description": description,
+                    "account": {"id": credit_accounts[0]["id"]},
+                    "amountGross": -total_with_vat,
+                    "amountGrossCurrency": -total_with_vat,
+                }
+                credit_acct_num = credit_accounts[0].get("number", 0)
+                if 2400 <= int(credit_acct_num) <= 2499:
+                    credit_posting["supplier"] = {"id": supplier["id"]}
+                if invoice_number:
+                    credit_posting["invoiceNumber"] = str(invoice_number)
+                postings.append(credit_posting)
+                LOGGER.info("Using vatType %s on expense posting for incoming invoice", incoming_vat_type.get("name"))
+            else:
+                # Fallback: manual 3-posting approach
+                vat_amount = round(total_with_vat - amount, 2)
+                expense_posting_m: dict[str, Any] = {
+                    "row": 1, "date": posting_date, "description": description,
+                    "account": {"id": debit_account_id},
+                    "amountGross": amount, "amountGrossCurrency": amount,
+                }
+                if dept_ref:
+                    expense_posting_m["department"] = dept_ref
+                if invoice_number:
+                    expense_posting_m["invoiceNumber"] = str(invoice_number)
+                postings.append(expense_posting_m)
+
+                vat_accounts = self.client.search_accounts_by_number(2710)
+                if vat_accounts:
+                    vat_posting: dict[str, Any] = {
+                        "row": 2, "date": posting_date, "description": f"MVA {description}",
+                        "account": {"id": vat_accounts[0]["id"]},
+                        "amountGross": vat_amount, "amountGrossCurrency": vat_amount,
+                    }
+                    if invoice_number:
+                        vat_posting["invoiceNumber"] = str(invoice_number)
+                    postings.append(vat_posting)
+
+                credit_posting_m: dict[str, Any] = {
+                    "row": 3, "date": posting_date, "description": description,
+                    "account": {"id": credit_accounts[0]["id"]},
+                    "amountGross": -total_with_vat, "amountGrossCurrency": -total_with_vat,
+                }
+                credit_acct_num = credit_accounts[0].get("number", 0)
+                if 2400 <= int(credit_acct_num) <= 2499:
+                    credit_posting_m["supplier"] = {"id": supplier["id"]}
+                if invoice_number:
+                    credit_posting_m["invoiceNumber"] = str(invoice_number)
+                postings.append(credit_posting_m)
         else:
-            # 2-line voucher: debit expense, credit supplier/bank
+            # No VAT: 2-line voucher
             expense_posting_nv: dict[str, Any] = {
                 "row": 1, "date": posting_date, "description": description,
                 "account": {"id": debit_account_id},
@@ -4940,17 +4985,17 @@ class TripletexService:
             if invoice_number:
                 expense_posting_nv["invoiceNumber"] = str(invoice_number)
             postings.append(expense_posting_nv)
-            credit_posting = {
+            credit_posting_nv: dict[str, Any] = {
                 "row": 2, "date": posting_date, "description": description,
                 "account": {"id": credit_accounts[0]["id"]},
                 "amountGross": -amount, "amountGrossCurrency": -amount,
             }
             credit_acct_num = credit_accounts[0].get("number", 0)
             if 2400 <= int(credit_acct_num) <= 2499:
-                credit_posting["supplier"] = {"id": supplier["id"]}
+                credit_posting_nv["supplier"] = {"id": supplier["id"]}
             if invoice_number:
-                credit_posting["invoiceNumber"] = str(invoice_number)
-            postings.append(credit_posting)
+                credit_posting_nv["invoiceNumber"] = str(invoice_number)
+            postings.append(credit_posting_nv)
 
         voucher_payload: dict[str, Any] = {
             "date": invoice_date.isoformat(),

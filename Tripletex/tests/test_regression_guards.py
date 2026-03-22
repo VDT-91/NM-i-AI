@@ -139,6 +139,13 @@ class _IncomingInvoiceVoucherClient:
             return [{"id": 1920, "number": 1920}]
         return []
 
+    def search_vat_types(self, **kwargs) -> list[dict]:
+        return [
+            {"id": 1, "name": "Fradrag inngående avgift, høy sats", "percentage": 25.0},
+            {"id": 5, "name": "Fradrag inngående avgift, lav sats", "percentage": 15.0},
+            {"id": 3, "name": "Utgående mva, høy sats", "percentage": 25.0},
+        ]
+
     def list(self, path: str, *, fields: str | None = None, params: dict | None = None) -> list[dict]:
         if path != "/ledger/voucherType":
             raise AssertionError(path)
@@ -171,8 +178,13 @@ class IncomingInvoiceVoucherRegressionTest(unittest.TestCase):
 
         voucher = client.vouchers[-1]
         self.assertEqual(voucher["voucherType"]["id"], 2)
-        self.assertEqual([posting["date"] for posting in voucher["postings"]], ["2026-05-04"] * 3)
-        self.assertEqual(voucher["postings"][2]["supplier"]["id"], 777)
+        # With vatType approach: 2 postings (expense w/ vatType + credit supplier)
+        # Without vatType: 3 postings (expense + VAT + credit supplier)
+        self.assertIn(len(voucher["postings"]), (2, 3))
+        self.assertTrue(all(p["date"] == "2026-05-04" for p in voucher["postings"]))
+        # Supplier must be on credit (last) posting
+        last_posting = voucher["postings"][-1]
+        self.assertEqual(last_posting["supplier"]["id"], 777)
         self.assertEqual(voucher["vendorInvoiceNumber"], "INV-2026-42")
         self.assertTrue(all(posting["invoiceNumber"] == "INV-2026-42" for posting in voucher["postings"]))
 
