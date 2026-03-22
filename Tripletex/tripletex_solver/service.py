@@ -3316,6 +3316,25 @@ class TripletexService:
                     expense_account_num,
                 )
 
+    @staticmethod
+    def _receipt_item_to_account(item_desc: str) -> int | None:
+        """Map receipt item description to the correct Norwegian expense account."""
+        desc = _normalize_ascii(item_desc)
+        mapping: list[tuple[tuple[str, ...], int]] = [
+            (("overnatting", "hotell", "accommodation", "ubernachtung", "hebergement", "alojamiento"), 7140),
+            (("middag representasjon", "lunsj representasjon", "representasjon"), 6860),
+            (("kontorrekvisita", "kontorstoler", "kontorutstyr", "kontorrekv"), 6800),
+            (("headset", "tastatur", "datautstyr", "pc", "laptop", "skjerm", "monitor"), 6800),
+            (("reise", "fly", "tog", "buss", "taxi", "drosje", "transport", "billett"), 7130),
+            (("telefon", "mobil", "internett", "bredbånd"), 6900),
+            (("parkering",), 7160),
+            (("drivstoff", "bensin", "diesel"), 7000),
+        ]
+        for keywords, account in mapping:
+            if any(kw in desc for kw in keywords):
+                return account
+        return None
+
     def _extract_receipt_vat_rate(self) -> float | None:
         import re as _re
 
@@ -3539,6 +3558,14 @@ class TripletexService:
                             if acct_int != 2710:
                                 expense_account_num = acct_int
                                 break
+
+                # Override expense account based on receipt item description
+                override_acct = self._receipt_item_to_account(receipt_desc)
+                if override_acct is not None:
+                    expense_account_num = override_acct
+                    LOGGER.info("Receipt item %r → expense account %d", receipt_desc, expense_account_num)
+                elif expense_account_num is None:
+                    expense_account_num = 6800  # Generic fallback
 
                 if expense_account_num is not None:
                     posting_date_rcpt = voucher_date.isoformat()
@@ -4720,7 +4747,14 @@ class TripletexService:
     def _pick_receipt_line_item(self, task: ParsedTask) -> tuple[str, float] | None:
         import re as _re
 
-        prompt_norm = _normalize_ascii(task.raw_prompt or "")
+        # Strip attachment text from prompt so we only match against the user's request
+        raw = task.raw_prompt or ""
+        for sep in ("\nAttachment content:\n", "\n\nAttachment content:\n", "\n[Attachment:"):
+            idx = raw.find(sep)
+            if idx >= 0:
+                raw = raw[:idx]
+                break
+        prompt_norm = _normalize_ascii(raw)
         if not prompt_norm:
             return None
 
@@ -4827,6 +4861,11 @@ class TripletexService:
                 total_incl = receipt_amount
                 raw_amount = receipt_amount
                 task.attributes["description"] = receipt_desc
+                # Override debit account based on receipt item description
+                override_account = self._receipt_item_to_account(receipt_desc)
+                if override_account is not None:
+                    debit_acct_num = override_account
+                    LOGGER.info("Receipt item %r → expense account %d", receipt_desc, debit_acct_num)
                 LOGGER.info("Selected specific receipt line item %r amount %.2f", receipt_desc, receipt_amount)
         if is_receipt and not amount_is_incl_vat and total_incl is None:
             amount_is_incl_vat = True

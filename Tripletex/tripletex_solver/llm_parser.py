@@ -407,7 +407,7 @@ def parse_with_llm(prompt: str, *, few_shot_text: str = "") -> ParsedTask:
     )
     if (
         _contains_any_ascii(prompt, _VOUCHER_KEYWORDS)
-        and task.entity not in (Entity.VOUCHER, Entity.ASSET, Entity.BANK_STATEMENT)
+        and task.entity not in (Entity.VOUCHER, Entity.ASSET, Entity.BANK_STATEMENT, Entity.DIMENSION)
     ):
         task.entity = Entity.VOUCHER
         task.action = Action.CREATE

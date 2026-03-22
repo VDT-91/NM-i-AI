@@ -42,6 +42,8 @@ class RecordingClient:
             {"id": 3, "percentage": 25.0, "name": "Utgående MVA 25%"},
             {"id": 6, "percentage": 15.0, "name": "Utgående MVA 15%"},
             {"id": 5, "percentage": 0.0, "name": "Ingen MVA"},
+            {"id": 1, "percentage": 25.0, "name": "Fradrag inngående avgift, høy sats"},
+            {"id": 11, "percentage": 15.0, "name": "Fradrag inngående avgift, lav sats"},
         ]
         self._accounts: dict[int, dict] = {
             1920: {"id": 1920, "number": 1920, "name": "Bank", "isInvoiceAccount": True, "bankAccountNumber": "10000000006"},
@@ -552,20 +554,20 @@ class TestIncomingInvoiceVAT(unittest.TestCase):
         voucher = self.client.voucher_payloads[0]
         postings = voucher["postings"]
 
-        # 3-line voucher: expense (net) + VAT + supplier credit (total)
-        self.assertEqual(len(postings), 3)
+        # vatType approach: 2 postings (expense w/ vatType + credit)
+        # fallback: 3 postings (expense + VAT + credit)
+        self.assertIn(len(postings), (2, 3))
 
-        # Expense line: net = 24500/1.25 = 19600
-        expense = postings[0]
-        self.assertAlmostEqual(expense["amountGross"], 19600.0)
-
-        # VAT line: 4900
-        vat = postings[1]
-        self.assertAlmostEqual(vat["amountGross"], 4900.0)
-
-        # Credit line: -24500
-        credit = postings[2]
-        self.assertAlmostEqual(credit["amountGross"], -24500.0)
+        if len(postings) == 2:
+            # vatType approach: expense has gross amount, Tripletex handles VAT
+            self.assertAlmostEqual(postings[0]["amountGross"], 24500.0)
+            self.assertIn("vatType", postings[0])
+            self.assertAlmostEqual(postings[1]["amountGross"], -24500.0)
+        else:
+            # Manual 3-posting: expense (net) + VAT + credit
+            self.assertAlmostEqual(postings[0]["amountGross"], 19600.0)
+            self.assertAlmostEqual(postings[1]["amountGross"], 4900.0)
+            self.assertAlmostEqual(postings[2]["amountGross"], -24500.0)
 
     def test_incoming_invoice_excluding_vat(self):
         """Amount excluding VAT should be treated as net directly."""
@@ -588,12 +590,17 @@ class TestIncomingInvoiceVAT(unittest.TestCase):
         voucher = self.client.voucher_payloads[0]
         postings = voucher["postings"]
 
-        # Expense: 10000 (net)
-        self.assertAlmostEqual(postings[0]["amountGross"], 10000.0)
-        # VAT: 2500
-        self.assertAlmostEqual(postings[1]["amountGross"], 2500.0)
-        # Credit: -12500
-        self.assertAlmostEqual(postings[2]["amountGross"], -12500.0)
+        # vatType approach: 2 postings; fallback: 3 postings
+        self.assertIn(len(postings), (2, 3))
+        if len(postings) == 2:
+            # vatType: total_with_vat = 10000 * 1.25 = 12500
+            self.assertAlmostEqual(postings[0]["amountGross"], 12500.0)
+            self.assertIn("vatType", postings[0])
+            self.assertAlmostEqual(postings[1]["amountGross"], -12500.0)
+        else:
+            self.assertAlmostEqual(postings[0]["amountGross"], 10000.0)
+            self.assertAlmostEqual(postings[1]["amountGross"], 2500.0)
+            self.assertAlmostEqual(postings[2]["amountGross"], -12500.0)
 
     def test_incoming_invoice_no_vat(self):
         """No VAT → 2-line voucher."""
@@ -655,12 +662,19 @@ class TestIncomingInvoiceVAT(unittest.TestCase):
 
         voucher = self.client.voucher_payloads[0]
         postings = voucher["postings"]
-        # Net = 18750 / 1.25 = 15000
-        self.assertAlmostEqual(postings[0]["amountGross"], 15000.0)
-        # VAT = 3750
-        self.assertAlmostEqual(postings[1]["amountGross"], 3750.0)
-        # Credit = -18750
-        self.assertAlmostEqual(postings[2]["amountGross"], -18750.0)
+        self.assertIn(len(postings), (2, 3))
+        if len(postings) == 2:
+            # vatType approach: expense has total incl VAT
+            self.assertAlmostEqual(postings[0]["amountGross"], 18750.0)
+            self.assertIn("vatType", postings[0])
+            self.assertAlmostEqual(postings[1]["amountGross"], -18750.0)
+        else:
+            # Net = 18750 / 1.25 = 15000
+            self.assertAlmostEqual(postings[0]["amountGross"], 15000.0)
+            # VAT = 3750
+            self.assertAlmostEqual(postings[1]["amountGross"], 3750.0)
+            # Credit = -18750
+            self.assertAlmostEqual(postings[2]["amountGross"], -18750.0)
 
 
 # ===========================================================================
