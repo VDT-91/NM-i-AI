@@ -1351,6 +1351,9 @@ class TripletexService:
             payload["customerNumber"] = int(task.attributes["customerNumber"])
         if task.attributes.get("description"):
             payload["description"] = task.attributes["description"]
+        elif _contains_any_ascii(task.raw_prompt, ("description", "beskrivelse", "beschreibung", "descricao", "descripcion")):
+            # Prompt asks for a description but LLM didn't extract one — use generic
+            payload["description"] = name
 
         self.client.create("/customer", payload)
 
