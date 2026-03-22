@@ -1114,6 +1114,39 @@ class TripletexService:
         employment_form = task.attributes.get("employmentForm")
         pct = task.attributes.get("percentageOfFullTimeEquivalent")
         styrk = task.attributes.get("occupationCode") or task.attributes.get("styrkCode") or task.attributes.get("professionCode")
+        # Infer STYRK code from job title in prompt/attachment if not explicitly set
+        if not styrk:
+            import re as _re_styrk
+            title_match = _re_styrk.search(
+                r"(?:stillingen\s+som|the\s+position\s+(?:of|as)|puesto\s+de|poste\s+de|Stelle\s+als|cargo\s+de)\s+([A-Za-zÀ-ÿ\s-]+?)(?:\s+(?:i|in|en|dans|im|na)\s+|\s*[.,]|\s*$)",
+                task.raw_prompt or "",
+                _re_styrk.IGNORECASE,
+            )
+            if title_match:
+                job_title = _normalize_ascii(title_match.group(1).strip())
+                _TITLE_TO_STYRK = {
+                    "regnskapssjef": "2411", "regnskapsforer": "2411", "revisor": "2411",
+                    "okonomisjef": "1211", "finanssjef": "1211", "financial manager": "1211",
+                    "prosjektleder": "2421", "project manager": "2421", "projektleiter": "2421",
+                    "konsulent": "2431", "consultant": "2431", "berater": "2431",
+                    "utvikler": "2512", "programvareutvikler": "2512", "developer": "2512",
+                    "ingenior": "2149", "engineer": "2149", "ingenieur": "2149",
+                    "radgiver": "2422", "advisor": "2422",
+                    "kontormedarbeider": "4110", "office worker": "4410",
+                    "sekretar": "4120", "secretary": "4120",
+                    "markedssjef": "1221", "marketing manager": "1221",
+                    "hr-sjef": "1212", "personalsjef": "1212", "hr manager": "1212",
+                    "it-sjef": "1330", "daglig leder": "1120", "managing director": "1120",
+                    "selger": "3322", "sales representative": "3322",
+                    "kundebehandler": "4224", "customer service": "4224",
+                    "lageransvarlig": "4321", "warehouse manager": "4321",
+                    "logistikksjef": "1324", "logistics manager": "1324",
+                }
+                for title_key, code in _TITLE_TO_STYRK.items():
+                    if title_key in job_title:
+                        styrk = code
+                        LOGGER.info("Inferred STYRK code %s from job title %r", code, job_title)
+                        break
         hourly = task.attributes.get("hourlyWage") or task.attributes.get("hourlyRate")
         annual_salary = task.attributes.get("annualSalary")
         monthly_salary = task.attributes.get("monthlySalary")
@@ -1450,6 +1483,15 @@ class TripletexService:
             unit = self._resolve_product_unit(unit_name)
             if unit:
                 payload["productUnit"] = {"id": unit["id"]}
+
+        # Set revenue account (default: 3000 Salgsinntekt)
+        acct_num = _safe_int(task.attributes.get("accountNumber"), fallback=3000)
+        try:
+            rev_accounts = self.client.search_accounts_by_number(acct_num)
+            if rev_accounts:
+                payload["account"] = {"id": rev_accounts[0]["id"]}
+        except Exception:
+            pass
 
         try:
             self.client.create("/product", payload)
@@ -3569,16 +3611,34 @@ class TripletexService:
 
                 if expense_account_num is not None:
                     posting_date_rcpt = voucher_date.isoformat()
-                    # Credit account: 2400 (supplier) if available, else from LLM
+                    # Always use 2400 (leverandørgjeld) for receipt vouchers
                     credit_num_rcpt = 2400
-                    for p in llm_ps:
-                        ca = p.get("creditAccount")
-                        if ca is not None:
-                            try:
-                                credit_num_rcpt = int(ca)
-                            except (ValueError, TypeError):
-                                pass
-                            break
+
+                    # Extract supplier from receipt attachment text or LLM attributes
+                    receipt_supplier_name = task.target_name or task.attributes.get("supplierName")
+                    receipt_org_number = task.attributes.get("organizationNumber")
+                    if not receipt_supplier_name and self.last_attachment_text:
+                        # First line of receipt text is usually the merchant name
+                        import re as _re_sup
+                        att_match = _re_sup.search(r"\[Attachment:[^\]]*\]\s*\n?(.+)", self.last_attachment_text)
+                        if att_match:
+                            receipt_supplier_name = att_match.group(1).strip()
+                    if not receipt_org_number and self.last_attachment_text:
+                        import re as _re_org
+                        org_match = _re_org.search(r"[Oo]rg\.?\s*(?:nr|n[ºo°])[\s.:]*(\d{9})", self.last_attachment_text)
+                        if org_match:
+                            receipt_org_number = org_match.group(1)
+
+                    # Create supplier for the receipt merchant
+                    receipt_supplier = None
+                    if receipt_supplier_name:
+                        try:
+                            receipt_supplier = self._ensure_supplier(
+                                name=receipt_supplier_name,
+                                org_number=receipt_org_number,
+                            )
+                        except Exception:
+                            LOGGER.warning("Failed to create supplier %r for receipt", receipt_supplier_name)
 
                     expense_amount = float(receipt_total_incl)
                     vat_amount = 0.0
@@ -3633,17 +3693,12 @@ class TripletexService:
                         "amountGrossCurrency": -float(receipt_total_incl),
                         "_account_number": credit_num_rcpt,
                     }
-                    if 2400 <= credit_num_rcpt <= 2499:
-                        # Use receipt merchant name as supplier, not LLM posting description
-                        supplier_name = task.target_name or task.attributes.get("supplierName")
-                        if supplier_name:
-                            try:
-                                sup = self._ensure_supplier(name=supplier_name)
-                                c_post["supplier"] = {"id": sup["id"]}
-                            except Exception:
-                                pass
+                    if receipt_supplier:
+                        c_post["supplier"] = {"id": receipt_supplier["id"]}
                     postings.append(c_post)
-                    LOGGER.info("Receipt item override: built %d postings for %r (expense=%d)", len(postings), receipt_desc, expense_account_num)
+                    LOGGER.info("Receipt item override: built %d postings for %r (expense=%d, credit=%d, supplier=%s)",
+                                len(postings), receipt_desc, expense_account_num, credit_num_rcpt,
+                                receipt_supplier_name)
 
         # Handle LLM format: postings=[{debitAccount: 1500, creditAccount: 3000, amount: 1000}]
         # Also handles split format: [{debitAccount: 2400, amount: X}, {creditAccount: 1920, amount: X}]
@@ -4908,8 +4963,8 @@ class TripletexService:
                 # Override debit account based on receipt item description
                 override_account = self._receipt_item_to_account(receipt_desc)
                 if override_account is not None:
-                    debit_acct_num = override_account
-                    LOGGER.info("Receipt item %r → expense account %d", receipt_desc, debit_acct_num)
+                    task.attributes["debitAccountNumber"] = override_account
+                    LOGGER.info("Receipt item %r → expense account %d", receipt_desc, override_account)
                 LOGGER.info("Selected specific receipt line item %r amount %.2f", receipt_desc, receipt_amount)
         if is_receipt and not amount_is_incl_vat and total_incl is None:
             amount_is_incl_vat = True

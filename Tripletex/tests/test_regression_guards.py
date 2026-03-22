@@ -1379,7 +1379,8 @@ class ReceiptVoucherRegressionTest(unittest.TestCase):
         self.assertEqual(voucher["postings"][0]["amountGross"], 8080.0)
         self.assertEqual(voucher["postings"][1]["account"]["id"], 2710)
         self.assertEqual(voucher["postings"][1]["amountGross"], 2020.0)
-        self.assertEqual(voucher["postings"][2]["account"]["id"], 1920)
+        # Receipt vouchers always use 2400 (leverandørgjeld) with supplier
+        self.assertEqual(voucher["postings"][2]["account"]["id"], 2400)
         self.assertEqual(voucher["postings"][2]["amountGross"], -10100.0)
 
 
