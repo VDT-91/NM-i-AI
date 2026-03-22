@@ -3493,11 +3493,136 @@ class TripletexService:
 
         postings: list[dict[str, Any]] = []
 
+        # --- Receipt item override: detect receipt + specific item BEFORE LLM postings ---
+        prompt_normalized_receipt = _normalize_ascii(task.raw_prompt or "")
+        is_receipt_voucher = any(
+            kw in prompt_normalized_receipt
+            for kw in ("kvittering", "receipt", "recibo", "quittung", "recu")
+        )
+        if is_receipt_voucher:
+            receipt_item = self._pick_receipt_line_item(task)
+            if receipt_item:
+                receipt_desc, receipt_total_incl = receipt_item
+                LOGGER.info("Receipt item override in voucher: %r amount %.2f", receipt_desc, receipt_total_incl)
+                vat_rate = self._extract_receipt_vat_rate()
+                # Find expense account from LLM postings or prompt
+                llm_ps = task.attributes.get("postings") or []
+                expense_account_num = None
+                import re as _re_rcpt
+                desc_norm_rcpt = _normalize_ascii(receipt_desc)
+                desc_tokens_rcpt = {t for t in _re_rcpt.findall(r"[a-z0-9]+", desc_norm_rcpt) if len(t) >= 3}
+                best_score_rcpt = -1
+                for p in llm_ps:
+                    acct = p.get("debitAccount")
+                    if acct is None:
+                        continue
+                    try:
+                        acct_int = int(acct)
+                    except (ValueError, TypeError):
+                        continue
+                    if acct_int == 2710:
+                        continue
+                    p_desc_norm = _normalize_ascii(p.get("description") or "")
+                    score = sum(1 for t in desc_tokens_rcpt if t in p_desc_norm)
+                    if score > best_score_rcpt:
+                        best_score_rcpt = score
+                        expense_account_num = acct_int
+                if expense_account_num is None:
+                    # Fall back to first non-VAT debit account
+                    for p in llm_ps:
+                        acct = p.get("debitAccount")
+                        if acct is not None:
+                            try:
+                                acct_int = int(acct)
+                            except (ValueError, TypeError):
+                                continue
+                            if acct_int != 2710:
+                                expense_account_num = acct_int
+                                break
+
+                if expense_account_num is not None:
+                    posting_date_rcpt = voucher_date.isoformat()
+                    # Credit account: 2400 (supplier) if available, else from LLM
+                    credit_num_rcpt = 2400
+                    for p in llm_ps:
+                        ca = p.get("creditAccount")
+                        if ca is not None:
+                            try:
+                                credit_num_rcpt = int(ca)
+                            except (ValueError, TypeError):
+                                pass
+                            break
+
+                    expense_amount = float(receipt_total_incl)
+                    vat_amount = 0.0
+                    # Receipt prices in Norway include VAT
+                    # Check if representation expense (non-deductible VAT)
+                    is_representation = expense_account_num in (6860, 6861, 6862, 6863)
+                    if vat_rate and vat_rate > 0 and not is_representation:
+                        expense_amount = round(float(receipt_total_incl) / (1 + vat_rate / 100), 2)
+                        vat_amount = round(float(receipt_total_incl) - expense_amount, 2)
+
+                    row = 1
+                    expense_acct = self._ensure_account(expense_account_num)
+                    d_post: dict[str, Any] = {
+                        "row": row, "date": posting_date_rcpt, "description": receipt_desc,
+                        "account": {"id": expense_acct["id"]},
+                        "amountGross": expense_amount, "amountGrossCurrency": expense_amount,
+                        "_account_number": expense_account_num,
+                    }
+                    # Apply department from attributes or prompt
+                    dept_name = task.attributes.get("departmentName") or task.attributes.get("department")
+                    if not dept_name:
+                        import re as _re_dept
+                        dept_match = _re_dept.search(
+                            r"(?:departamento|department|avdeling|abteilung|departement)\s+(\S+)",
+                            task.raw_prompt or "", _re_dept.IGNORECASE,
+                        )
+                        if dept_match:
+                            dept_name = dept_match.group(1).rstrip(".,;:")
+                    if dept_name and isinstance(dept_name, str):
+                        dept = self._ensure_department(dept_name)
+                        if dept:
+                            d_post["department"] = {"id": dept["id"]}
+                    postings.append(d_post)
+                    row += 1
+
+                    if vat_amount > 0:
+                        vat_acct = self._ensure_account(2710)
+                        postings.append({
+                            "row": row, "date": posting_date_rcpt,
+                            "description": f"MVA {receipt_desc}",
+                            "account": {"id": vat_acct["id"]},
+                            "amountGross": vat_amount, "amountGrossCurrency": vat_amount,
+                            "_account_number": 2710,
+                        })
+                        row += 1
+
+                    credit_acct = self._ensure_account(credit_num_rcpt)
+                    c_post: dict[str, Any] = {
+                        "row": row, "date": posting_date_rcpt, "description": receipt_desc,
+                        "account": {"id": credit_acct["id"]},
+                        "amountGross": -float(receipt_total_incl),
+                        "amountGrossCurrency": -float(receipt_total_incl),
+                        "_account_number": credit_num_rcpt,
+                    }
+                    if 2400 <= credit_num_rcpt <= 2499:
+                        # Use receipt merchant name as supplier, not LLM posting description
+                        supplier_name = task.target_name or task.attributes.get("supplierName")
+                        if supplier_name:
+                            try:
+                                sup = self._ensure_supplier(name=supplier_name)
+                                c_post["supplier"] = {"id": sup["id"]}
+                            except Exception:
+                                pass
+                    postings.append(c_post)
+                    LOGGER.info("Receipt item override: built %d postings for %r (expense=%d)", len(postings), receipt_desc, expense_account_num)
+
         # Handle LLM format: postings=[{debitAccount: 1500, creditAccount: 3000, amount: 1000}]
         # Also handles split format: [{debitAccount: 2400, amount: X}, {creditAccount: 1920, amount: X}]
         self._strip_unresolved_salary_provision_postings(task)
         llm_postings = task.attributes.get("postings")
-        if llm_postings and isinstance(llm_postings, list):
+        if not postings and llm_postings and isinstance(llm_postings, list):
             self._correct_missing_vat_adjustment_postings(task, llm_postings, voucher_date)
             # Try to pair up single-sided postings (debit-only + credit-only)
             debit_only = [p for p in llm_postings if p.get("debitAccount") and not p.get("creditAccount")]
